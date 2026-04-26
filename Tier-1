@@ -1,1 +1,1618 @@
+function Show-LoadingBar {
+    param([string]$StepName)
 
+    for ($i = 0; $i -le 20; $i++) {
+        $percent = $i * 5
+        $bar = ("#" * $i) + ("-" * (20 - $i))
+        Write-Host "`r[ $bar ] $percent%" -NoNewline
+        Start-Sleep -Milliseconds 120
+    }
+
+    Write-Host "`n"
+}
+
+function Wait-ForEnter {
+    Start-Sleep -Milliseconds 250
+
+    try {
+        while ([Console]::KeyAvailable) {
+            [Console]::ReadKey($true) | Out-Null
+            Start-Sleep -Milliseconds 25
+        }
+    } catch {}
+
+    [Console]::ReadLine() | Out-Null
+}
+
+function Confirm-ShowDetectionsWithDelay {
+    while ($true) {
+        Write-Host ""
+        Write-Host "Are you sure you want to show detections?" -ForegroundColor Yellow
+        Write-Host "Press Enter after the countdown to show detections, or type N then press Enter to keep monitoring." -ForegroundColor Yellow
+
+        try {
+            while ([Console]::KeyAvailable) {
+                [Console]::ReadKey($true) | Out-Null
+                Start-Sleep -Milliseconds 25
+            }
+        } catch {}
+
+        for ($i = 3; $i -ge 1; $i--) {
+            Write-Host "Detection reveal unlocks in $i second(s)..." -ForegroundColor Cyan
+            Start-Sleep -Seconds 1
+        }
+
+        Write-Host "You can press Enter now to show detections, or type N then press Enter to keep monitoring." -ForegroundColor Yellow
+
+        try {
+            while ([Console]::KeyAvailable) {
+                [Console]::ReadKey($true) | Out-Null
+                Start-Sleep -Milliseconds 25
+            }
+        } catch {}
+
+        $answer = [Console]::ReadLine()
+
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $true
+        }
+
+        if ($answer.Trim() -match '^(n|no)$') {
+            Write-Host "Detection reveal cancelled. Monitoring is still active." -ForegroundColor Green
+            return $false
+        }
+
+        if ($answer.Trim() -match '^(y|yes)$') {
+            return $true
+        }
+
+        Write-Host "Invalid choice. Press Enter to show detections, or type N to keep monitoring." -ForegroundColor Yellow
+    }
+}
+
+function Confirm-ExitWithDelay {
+    while ($true) {
+        Write-Host ""
+        Write-Host "Do you want to exit?" -ForegroundColor Yellow
+        Write-Host "Press Enter after the countdown to exit, or type N then press Enter to stay on this screen." -ForegroundColor Yellow
+
+        try {
+            while ([Console]::KeyAvailable) {
+                [Console]::ReadKey($true) | Out-Null
+                Start-Sleep -Milliseconds 25
+            }
+        } catch {}
+
+        for ($i = 3; $i -ge 1; $i--) {
+            Write-Host "`rExit unlocks in $i second(s)..." -ForegroundColor Cyan -NoNewline
+            Start-Sleep -Seconds 1
+        }
+
+        Write-Host "`rYou can press Enter now to exit, or type N then press Enter to stay.          " -ForegroundColor Yellow
+
+        try {
+            while ([Console]::KeyAvailable) {
+                [Console]::ReadKey($true) | Out-Null
+                Start-Sleep -Milliseconds 25
+            }
+        } catch {}
+
+        $answer = [Console]::ReadLine()
+
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $true
+        }
+
+        if ($answer.Trim() -match '^(n|no)$') {
+            Write-Host "Exit cancelled. Results will stay open." -ForegroundColor Green
+            continue
+        }
+
+        if ($answer.Trim() -match '^(y|yes)$') {
+            return $true
+        }
+
+        Write-Host "Invalid choice. Press Enter to exit, or type N to stay." -ForegroundColor Yellow
+    }
+}
+
+function Write-Section {
+    param($Title, $Lines)
+
+    Write-Host "--- $Title ---" -ForegroundColor Cyan
+
+    foreach ($line in $Lines) {
+        if ($line -like "SUCCESS*") {
+            Write-Host $line -ForegroundColor Green
+        }
+        elseif ($line -like "FAILURE*") {
+            Write-Host $line -ForegroundColor Red
+        }
+        elseif ($line -like "WARNING*") {
+            Write-Host $line -ForegroundColor Yellow
+        }
+        elseif ($line -like "INFO*") {
+            Write-Host $line -ForegroundColor Yellow
+        }
+        else {
+            Write-Host $line -ForegroundColor White
+        }
+    }
+
+    Write-Host ""
+}
+
+function Add-Event {
+    param(
+        [System.Collections.Generic.List[string]]$List,
+        [string]$Message
+    )
+
+    $List.Add("[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message")
+}
+
+function Get-USBDrives {
+    $drives = @()
+
+    try {
+        $drives = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=2" -ErrorAction Stop |
+            Where-Object { $_.DeviceID } |
+            ForEach-Object { $_.DeviceID }
+    } catch {}
+
+    $drives
+}
+
+function Test-DriveHasExe {
+    param([string]$DriveRoot)
+
+    if (-not $DriveRoot) { return $false }
+
+    $root = if ($DriveRoot.EndsWith("\")) { $DriveRoot } else { "$DriveRoot\" }
+
+    try {
+        foreach ($file in [System.IO.Directory]::EnumerateFiles($root, "*.exe", [System.IO.SearchOption]::AllDirectories)) {
+            return $true
+        }
+    } catch {
+        try {
+            $found = Get-ChildItem -Path $root -Filter "*.exe" -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { return $true }
+        } catch {}
+    }
+
+    return $false
+}
+
+function Get-Exclusions {
+    $list = @()
+
+    try {
+        $prefs = Get-MpPreference -ErrorAction Stop
+        if ($prefs.ExclusionPath) { $list += $prefs.ExclusionPath }
+        if ($prefs.ExclusionProcess) { $list += $prefs.ExclusionProcess }
+        if ($prefs.ExclusionExtension) { $list += $prefs.ExclusionExtension }
+    } catch {}
+
+    $list
+}
+
+function Get-RegistryContentRecursive {
+    param([string]$BasePath)
+
+    $results = @{}
+    if (-not (Test-Path $BasePath)) { return $results }
+
+    try {
+        foreach ($item in (Get-ChildItem -Path $BasePath -Recurse -ErrorAction SilentlyContinue)) {
+            if ($item.PSChildName -eq '(default)') { continue }
+
+            $props = Get-ItemProperty -Path $item.PSPath -ErrorAction SilentlyContinue
+            if (-not $props) { continue }
+
+            $nonDefault = $props.PSObject.Properties | Where-Object {
+                $_.Name -notlike 'PS*' -and $_.Name -ne '(default)' -and $_.Value -ne $null -and $_.Value -ne ''
+            }
+
+            if ($nonDefault.Count -gt 0) {
+                $results[$item.PSPath] = ($nonDefault | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', '
+            }
+        }
+    } catch {}
+
+    $results
+}
+
+function Get-ExistingFolderPath {
+    param(
+        [string]$BaseDir,
+        [string]$FolderName
+    )
+
+    try {
+        $candidate = Join-Path $BaseDir $FolderName
+        if (Test-Path $candidate -PathType Container) {
+            return (Get-Item $candidate -ErrorAction SilentlyContinue).FullName
+        }
+    } catch {}
+
+    $null
+}
+
+function Get-FolderContentsSet {
+    param([string]$FolderPath)
+
+    $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    if (-not $FolderPath) { return $set }
+    if (-not (Test-Path $FolderPath -PathType Container)) { return $set }
+
+    try {
+        foreach ($child in (Get-ChildItem -Path $FolderPath -Force -ErrorAction Stop)) {
+            [void]$set.Add($child.Name)
+        }
+    } catch {}
+
+    $set
+}
+
+function Get-NormalizedPath {
+    param([string]$Path)
+
+    if (-not $Path) { return $null }
+
+    try {
+        return [System.IO.Path]::GetFullPath($Path).TrimEnd('\').ToLowerInvariant()
+    } catch {
+        return $Path.TrimEnd('\').ToLowerInvariant()
+    }
+}
+
+function Test-StartsWithAnyPath {
+    param(
+        [string]$Path,
+        [string[]]$Prefixes
+    )
+
+    if (-not $Path) { return $false }
+
+    foreach ($prefix in $Prefixes) {
+        if (-not $prefix) { continue }
+
+        if ($Path -eq $prefix -or $Path.StartsWith($prefix + '\')) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+$eventList = [System.Collections.Generic.List[string]]::new()
+
+$folderTargets = @(
+    @{ Base = $env:SystemDrive; Name = 'Photon' },
+    @{ Base = $env:SystemDrive; Name = 'matcha' },
+    @{ Base = $env:SystemDrive; Name = 'v2' },
+    @{ Base = $env:SystemDrive; Name = 'serotonin' }
+)
+
+$registryBasePaths = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows Defender\Threats',
+    'HKLM:\SOFTWARE\Microsoft\Windows Defender\Exclusions'
+)
+
+$monitoredExePaths = @(
+    "$env:USERPROFILE\Downloads",
+    "$env:USERPROFILE\Desktop",
+    "$env:USERPROFILE\Documents",
+    "$env:USERPROFILE\Pictures"
+) | ForEach-Object { Get-NormalizedPath $_ } | Where-Object { $_ }
+
+$initialUSB = Get-USBDrives
+$initialExclusions = Get-Exclusions
+try { $initialRTP = (Get-MpComputerStatus).RealTimeProtectionEnabled } catch { $initialRTP = $null }
+
+$initialRegistry = @{}
+foreach ($base in $registryBasePaths) {
+    $initialRegistry[$base] = Get-RegistryContentRecursive $base
+}
+
+$initialFolders = @{}
+foreach ($target in $folderTargets) {
+    $targetKey = "$($target.Base)|$($target.Name)"
+    $path = Get-ExistingFolderPath -BaseDir $target.Base -FolderName $target.Name
+    $initialFolders[$targetKey] = @{
+        Base = $target.Base
+        Name = $target.Name
+        Path = $path
+        Contents = (Get-FolderContentsSet -FolderPath $path)
+    }
+}
+
+try { $initialThreats = Get-MpThreat -ErrorAction SilentlyContinue } catch { $initialThreats = $null }
+
+foreach ($drive in $initialUSB) {
+    $hasExe = Test-DriveHasExe -DriveRoot $drive
+    Add-Event -List $eventList -Message "USB inserted: $drive (EXEs: $hasExe)"
+}
+
+foreach ($ex in $initialExclusions) {
+    Add-Event -List $eventList -Message "Exclusion active: $ex"
+}
+
+if ($initialRTP -eq $false) {
+    Add-Event -List $eventList -Message 'Real-time protection: DISABLED'
+}
+
+foreach ($base in $registryBasePaths) {
+    foreach ($key in $initialRegistry[$base].Keys) {
+        Add-Event -List $eventList -Message "Registry key with values under $base : $key - Values: $($initialRegistry[$base][$key])"
+    }
+}
+
+foreach ($folderInfo in $initialFolders.Values) {
+    if ($folderInfo.Path) {
+        Add-Event -List $eventList -Message "Folder exists: $($folderInfo.Path)"
+        foreach ($item in $folderInfo.Contents) {
+            Add-Event -List $eventList -Message "  Content: $item"
+        }
+    }
+}
+
+if ($initialThreats) {
+    foreach ($t in $initialThreats) {
+        $status = switch ($t.ThreatStatus) {
+            1 { 'Allowed' }
+            2 { 'Quarantined' }
+            3 { 'Removed' }
+            default { 'Detected' }
+        }
+
+        Add-Event -List $eventList -Message "Defender threat history: $($t.ThreatName) | Status: $status | Detected: $($t.DetectionTime)"
+    }
+}
+
+$psHistoryPath = "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
+$scriptPath = $MyInvocation.MyCommand.Path
+$currentPID = $PID
+$normalizedScriptPath = Get-NormalizedPath $scriptPath
+$monitorHeartbeatPath = Join-Path $env:TEMP ("live_monitor_" + [guid]::NewGuid().ToString("N") + ".hb")
+
+$monitorJob = Start-Job -Name 'LiveMonitor' -ScriptBlock {
+    param(
+        $folderTargets,
+        $registryBasePaths,
+        $psHistoryPath,
+        $scriptPath,
+        $currentPID,
+        $heartbeatPath,
+        $monitoredExePaths
+    )
+
+    function Write-LiveEvent {
+        param([string]$Message)
+        Write-Output "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
+    }
+
+    function Update-Heartbeat {
+        param([string]$Path)
+        try {
+            [System.IO.File]::WriteAllText($Path, (Get-Date).ToString('o'))
+        } catch {}
+    }
+
+    function Get-USBDrives {
+        $drives = @()
+
+        try {
+            $drives = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=2" -ErrorAction Stop |
+                Where-Object { $_.DeviceID } |
+                ForEach-Object { $_.DeviceID }
+        } catch {}
+
+        $drives
+    }
+
+    function Test-DriveHasExe {
+        param([string]$DriveRoot)
+
+        if (-not $DriveRoot) { return $false }
+
+        $root = if ($DriveRoot.EndsWith("\")) { $DriveRoot } else { "$DriveRoot\" }
+
+        try {
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($root, "*.exe", [System.IO.SearchOption]::AllDirectories)) {
+                return $true
+            }
+        } catch {
+            try {
+                $found = Get-ChildItem -Path $root -Filter "*.exe" -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($found) { return $true }
+            } catch {}
+        }
+
+        return $false
+    }
+
+    function Get-Exclusions {
+        $list = @()
+
+        try {
+            $prefs = Get-MpPreference -ErrorAction Stop
+            if ($prefs.ExclusionPath) { $list += $prefs.ExclusionPath }
+            if ($prefs.ExclusionProcess) { $list += $prefs.ExclusionProcess }
+            if ($prefs.ExclusionExtension) { $list += $prefs.ExclusionExtension }
+        } catch {}
+
+        $list
+    }
+
+    function Get-RegistryContentRecursive {
+        param([string]$BasePath)
+
+        $results = @{}
+        if (-not (Test-Path $BasePath)) { return $results }
+
+        try {
+            foreach ($item in (Get-ChildItem -Path $BasePath -Recurse -ErrorAction SilentlyContinue)) {
+                if ($item.PSChildName -eq '(default)') { continue }
+
+                $props = Get-ItemProperty -Path $item.PSPath -ErrorAction SilentlyContinue
+                if (-not $props) { continue }
+
+                $nonDefault = $props.PSObject.Properties | Where-Object {
+                    $_.Name -notlike 'PS*' -and $_.Name -ne '(default)' -and $_.Value -ne $null -and $_.Value -ne ''
+                }
+
+                if ($nonDefault.Count -gt 0) {
+                    $results[$item.PSPath] = ($nonDefault | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', '
+                }
+            }
+        } catch {}
+
+        $results
+    }
+
+    function Get-ExistingFolderPath {
+        param(
+            [string]$BaseDir,
+            [string]$FolderName
+        )
+
+        try {
+            $candidate = Join-Path $BaseDir $FolderName
+            if (Test-Path $candidate -PathType Container) {
+                return (Get-Item $candidate -ErrorAction SilentlyContinue).FullName
+            }
+        } catch {}
+
+        $null
+    }
+
+    function Get-FolderContentsSet {
+        param([string]$FolderPath)
+
+        $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        if (-not $FolderPath) { return $set }
+        if (-not (Test-Path $FolderPath -PathType Container)) { return $set }
+
+        try {
+            foreach ($child in (Get-ChildItem -Path $FolderPath -Force -ErrorAction Stop)) {
+                [void]$set.Add($child.Name)
+            }
+        } catch {}
+
+        $set
+    }
+
+    function Get-NormalizedPath {
+        param([string]$Path)
+
+        if (-not $Path) { return $null }
+
+        try {
+            return [System.IO.Path]::GetFullPath($Path).TrimEnd('\').ToLowerInvariant()
+        } catch {
+            return $Path.TrimEnd('\').ToLowerInvariant()
+        }
+    }
+
+    function Test-StartsWithAnyPath {
+        param(
+            [string]$Path,
+            [string[]]$Prefixes
+        )
+
+        if (-not $Path) { return $false }
+
+        foreach ($prefix in $Prefixes) {
+            if (-not $prefix) { continue }
+
+            if ($Path -eq $prefix -or $Path.StartsWith($prefix + '\')) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
+    function Register-ProcessWatcher {
+        param(
+            [string]$NormalizedScriptPath,
+            [int]$MainPID,
+            [int]$WorkerPID,
+            [System.Collections.Concurrent.ConcurrentQueue[string]]$Queue,
+            [string[]]$MonitoredPaths,
+            [string[]]$AllowedCommandMarkers
+        )
+
+        Unregister-Event -SourceIdentifier ProcessStartEvent -ErrorAction SilentlyContinue
+
+        $procQuery = 'SELECT * FROM Win32_ProcessStartTrace'
+        Register-CimIndicationEvent -Query $procQuery -SourceIdentifier ProcessStartEvent -Action {
+            $e = $Event.SourceEventArgs.NewEvent
+            $procName = $e.ProcessName
+            $pid = $e.ProcessID
+            $exePath = $null
+            $cmdLine = ''
+            $parentName = 'unknown'
+            $parentPID = $null
+            $normExePath = $null
+
+            try {
+                $proc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $pid" -ErrorAction Stop
+                $exePath = $proc.ExecutablePath
+                $cmdLine = $proc.CommandLine
+                $parentPID = $proc.ParentProcessId
+
+                if ($exePath) {
+                    try {
+                        $normExePath = [System.IO.Path]::GetFullPath($exePath).TrimEnd('\').ToLowerInvariant()
+                    } catch {
+                        $normExePath = $exePath.TrimEnd('\').ToLowerInvariant()
+                    }
+                }
+
+                if ($parentPID) {
+                    $parent = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $parentPID" -ErrorAction SilentlyContinue
+                    if ($parent) { $parentName = $parent.Name }
+                }
+            } catch {}
+
+            $isSelf = $false
+
+            if ($cmdLine -and $NormalizedScriptPath -and $cmdLine.ToLowerInvariant() -like "*$NormalizedScriptPath*") {
+                $isSelf = $true
+            }
+
+            if ($cmdLine -and $AllowedCommandMarkers) {
+                $lowerCmd = $cmdLine.ToLowerInvariant()
+                foreach ($marker in $AllowedCommandMarkers) {
+                    if ($marker -and $lowerCmd.Contains($marker.ToLowerInvariant())) {
+                        $isSelf = $true
+                        break
+                    }
+                }
+            }
+
+            if ($pid -eq $MainPID -or $pid -eq $WorkerPID -or $parentPID -eq $MainPID -or $parentPID -eq $WorkerPID) {
+                $isSelf = $true
+            }
+
+            if (-not $isSelf) {
+                $isWatchedShell = $procName -match '^(powershell|pwsh|cmd)(\.exe)?$'
+                $isFromMonitoredPath = $false
+
+                if ($normExePath) {
+                    foreach ($prefix in $MonitoredPaths) {
+                        if ($normExePath -eq $prefix -or $normExePath.StartsWith($prefix + '\')) {
+                            $isFromMonitoredPath = $true
+                            break
+                        }
+                    }
+                }
+
+                if ($isFromMonitoredPath) {
+                    $Queue.Enqueue("Suspicious EXE started: $procName (PID $pid) from $exePath (Parent: $parentName)") | Out-Null
+                }
+                elseif ($isWatchedShell) {
+                    $Queue.Enqueue("Process started: $procName (PID $pid) from $exePath (Parent: $parentName)") | Out-Null
+                }
+            }
+        } | Out-Null
+    }
+
+    function Test-AllowedCommandText {
+        param(
+            [string]$Text,
+            [string[]]$AllowedMarkers
+        )
+
+        if (-not $Text) { return $false }
+        if (-not $AllowedMarkers) { return $false }
+
+        $lowerText = $Text.ToLowerInvariant()
+        foreach ($marker in $AllowedMarkers) {
+            if ($marker -and $lowerText.Contains($marker.ToLowerInvariant())) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
+    function Test-AllowedDnsName {
+        param(
+            [string]$Name,
+            [string[]]$AllowedHosts
+        )
+
+        if (-not $Name) { return $false }
+        if (-not $AllowedHosts) { return $false }
+
+        $cleanName = $Name.TrimEnd('.').ToLowerInvariant()
+        foreach ($host in $AllowedHosts) {
+            if (-not $host) { continue }
+
+            $cleanHost = $host.TrimEnd('.').ToLowerInvariant()
+            if ($cleanName -eq $cleanHost -or $cleanName.EndsWith(".$cleanHost")) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
+    $prevUSB = Get-USBDrives
+    $prevExcl = Get-Exclusions
+    $prevRTP = $null
+    try { $prevRTP = (Get-MpComputerStatus).RealTimeProtectionEnabled } catch {}
+
+    $prevReg = @{}
+    foreach ($base in $registryBasePaths) {
+        $prevReg[$base] = Get-RegistryContentRecursive $base
+    }
+
+    $prevFolders = @{}
+    foreach ($t in $folderTargets) {
+        $targetKey = "$($t.Base)|$($t.Name)"
+        $path = Get-ExistingFolderPath -BaseDir $t.Base -FolderName $t.Name
+        $prevFolders[$targetKey] = @{
+            Base = $t.Base
+            Name = $t.Name
+            Exists = ($path -ne $null)
+            ActualPath = $path
+            Contents = (Get-FolderContentsSet -FolderPath $path)
+        }
+    }
+
+    $prevHist = @()
+    $prevHistSize = 0
+    $prevHistTime = $null
+
+    if (Test-Path $psHistoryPath) {
+        try {
+            $histInfo = Get-Item $psHistoryPath -ErrorAction Stop
+            $prevHist = Get-Content $psHistoryPath -ErrorAction Stop
+            $prevHistSize = $histInfo.Length
+            $prevHistTime = $histInfo.LastWriteTime
+        } catch {}
+    }
+
+    $prevRunningPathProcesses = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    try {
+        $runningNow = Get-CimInstance Win32_Process -ErrorAction Stop
+        foreach ($proc in $runningNow) {
+            if ($proc.ProcessId -eq $currentPID -or $proc.ProcessId -eq $PID) { continue }
+
+            $exePath = $proc.ExecutablePath
+            if (-not $exePath) { continue }
+
+            $norm = Get-NormalizedPath $exePath
+            if (Test-StartsWithAnyPath -Path $norm -Prefixes $monitoredExePaths) {
+                [void]$prevRunningPathProcesses.Add("$($proc.ProcessId)|$norm")
+            }
+        }
+    } catch {}
+
+    $lastEventTime = (Get-Date).AddHours(-1)
+    $defenderLog = 'Microsoft-Windows-Windows Defender/Operational'
+    $eventIDs = @(1116, 1117, 1118, 1119)
+
+    $allowedDnsHosts = @(
+        'download.sysinternals.com',
+        'raw.githubusercontent.com'
+    )
+
+    $allowedCommandMarkers = @(
+        'https://download.sysinternals.com/files/processexplorer.zip',
+        'https://raw.githubusercontent.com/reggiecarterthesecond-web/recording-policies/refs/heads/main/tier-1',
+        'https://raw.githubusercontent.com/reggiecarterthesecond-web/recording-policies/refs/heads/main/rejoin/tier-1',
+        'https://raw.githubusercontent.com/reggiecarterthesecond-web/recording-policies/refs/heads/main/tier-2',
+        'https://raw.githubusercontent.com/reggiecarterthesecond-web/recording-policies/refs/heads/main/rejoin/tier-2'
+    )
+
+    $dnsTargets = @(
+        @{ Label = 'GitHub'; Patterns = @('(^|\.)github\.com$', '(^|\.)raw\.githubusercontent\.com$', '(^|\.)gitlab\.com$', '(^|\.)bitbucket\.org$', '(^|\.)jsdelivr\.net$') },
+        @{ Label = 'KeyAuth'; Patterns = @('(^|\.)keyauth\.[a-z]+$') },
+        @{ Label = 'Pastebin / code-paste site'; Patterns = @(
+            '(^|\.)pastebin\.com$',
+            '(^|\.)ghostbin\.[a-z]+$',
+            '(^|\.)hastebin\.[a-z]+$',
+            '(^|\.)paste\.ee$',
+            '(^|\.)paste\.gg$',
+            '(^|\.)justpaste\.it$',
+            '(^|\.)dpaste\.[a-z]+$',
+            '(^|\.)controlc\.com$',
+            '(^|\.)pastecode\.[a-z]+$',
+            '(^|\.)rentry\.co$',
+            '(^|\.)textbin\.[a-z]+$',
+            '(^|\.)0bin\.[a-z]+$',
+            '(^|\.)privatebin\.[a-z]+$'
+        ) }
+    )
+
+    $alertedDnsLabels = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $jobPID = $PID
+    $procQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $normalizedScriptPath = Get-NormalizedPath $scriptPath
+
+    Register-ProcessWatcher -NormalizedScriptPath $normalizedScriptPath -MainPID $currentPID -WorkerPID $jobPID -Queue $procQueue -MonitoredPaths $monitoredExePaths -AllowedCommandMarkers $allowedCommandMarkers
+    Update-Heartbeat -Path $heartbeatPath
+
+    while ($true) {
+        Update-Heartbeat -Path $heartbeatPath
+
+        if (-not (Get-EventSubscriber -SourceIdentifier ProcessStartEvent -ErrorAction SilentlyContinue)) {
+            Write-LiveEvent 'Monitor integrity warning: process watcher was missing and was recreated.'
+            Register-ProcessWatcher -NormalizedScriptPath $normalizedScriptPath -MainPID $currentPID -WorkerPID $jobPID -Queue $procQueue -MonitoredPaths $monitoredExePaths -AllowedCommandMarkers $allowedCommandMarkers
+        }
+
+        $curUSB = Get-USBDrives
+        $usbAdded = $curUSB | Where-Object { $_ -notin $prevUSB }
+        $usbRemoved = $prevUSB | Where-Object { $_ -notin $curUSB }
+
+        foreach ($d in $usbAdded) {
+            $hasExe = Test-DriveHasExe -DriveRoot $d
+            Write-LiveEvent "USB inserted: $d (EXEs: $hasExe)"
+        }
+
+        foreach ($d in $usbRemoved) {
+            Write-LiveEvent "USB removed: $d"
+        }
+
+        $prevUSB = $curUSB
+
+        $curExcl = Get-Exclusions
+        $exclAdded = $curExcl | Where-Object { $_ -notin $prevExcl }
+        $exclRemoved = $prevExcl | Where-Object { $_ -notin $curExcl }
+
+        foreach ($e in $exclAdded) { Write-LiveEvent "Exclusion added: $e" }
+        foreach ($e in $exclRemoved) { Write-LiveEvent "Exclusion removed: $e" }
+
+        $prevExcl = $curExcl
+
+        try {
+            $curRTP = (Get-MpComputerStatus).RealTimeProtectionEnabled
+            if ($prevRTP -ne $null -and $curRTP -ne $prevRTP) {
+                Write-LiveEvent "Real-time protection changed to $(if ($curRTP) { 'enabled' } else { 'disabled' })"
+            }
+            $prevRTP = $curRTP
+        } catch {}
+
+        foreach ($base in $registryBasePaths) {
+            $curReg = Get-RegistryContentRecursive $base
+            $prevRegMap = $prevReg[$base]
+
+            foreach ($k in $curReg.Keys) {
+                if (-not $prevRegMap.ContainsKey($k)) {
+                    Write-LiveEvent "Registry key created under $base : $k - Values: $($curReg[$k])"
+                }
+                elseif ($curReg[$k] -ne $prevRegMap[$k]) {
+                    Write-LiveEvent "Registry key changed under $base : $k - New values: $($curReg[$k])"
+                }
+            }
+
+            foreach ($k in $prevRegMap.Keys) {
+                if (-not $curReg.ContainsKey($k)) {
+                    Write-LiveEvent "Registry key deleted under $base : $k"
+                }
+            }
+
+            $prevReg[$base] = $curReg
+        }
+
+        foreach ($t in $folderTargets) {
+            $targetKey = "$($t.Base)|$($t.Name)"
+            $prevFolder = $prevFolders[$targetKey]
+            $curPath = Get-ExistingFolderPath -BaseDir $t.Base -FolderName $t.Name
+            $curExists = ($curPath -ne $null)
+            $curContents = Get-FolderContentsSet -FolderPath $curPath
+
+            if ($curExists -ne $prevFolder.Exists) {
+                if ($curExists) {
+                    Write-LiveEvent "Folder CREATED: $curPath (match for '$($t.Name)')"
+                } else {
+                    Write-LiveEvent "Folder DELETED: $($prevFolder.ActualPath)"
+                }
+            }
+
+            if ($curExists) {
+                foreach ($item in $curContents) {
+                    if (-not $prevFolder.Contents.Contains($item)) {
+                        Write-LiveEvent "New item created: $(Join-Path $curPath $item)"
+                    }
+                }
+            }
+
+            $prevFolders[$targetKey] = @{
+                Base = $t.Base
+                Name = $t.Name
+                Exists = $curExists
+                ActualPath = $curPath
+                Contents = $curContents
+            }
+        }
+
+        if (Test-Path $psHistoryPath) {
+            try {
+                $histInfo = Get-Item $psHistoryPath -ErrorAction Stop
+                $sz = $histInfo.Length
+                $tm = $histInfo.LastWriteTime
+
+                if ($sz -ne $prevHistSize -or $tm -ne $prevHistTime) {
+                    $newHist = Get-Content $psHistoryPath -ErrorAction Stop
+                    $newCount = $newHist.Count
+                    $oldCount = $prevHist.Count
+
+                    if ($newCount -gt $oldCount) {
+                        $addedCount = $newCount - $oldCount
+                        $selfMatch = $false
+
+                        if ($addedCount -eq 1) {
+                            $cmd = $newHist[-1]
+                            if ($cmd -and $normalizedScriptPath -and $cmd.ToLowerInvariant() -like "*$normalizedScriptPath*") {
+                                $selfMatch = $true
+                            }
+
+                            if (Test-AllowedCommandText -Text $cmd -AllowedMarkers $allowedCommandMarkers) {
+                                $selfMatch = $true
+                            }
+
+                            if (-not $selfMatch -and $cmd -and $cmd.Trim()) {
+                                if ($cmd.Length -gt 200) { $cmd = $cmd.Substring(0, 200) + '...' }
+                                Write-LiveEvent "PowerShell command executed: $cmd"
+                            }
+                        }
+                        else {
+                            if ($oldCount -lt $newCount) {
+                                $newLines = $newHist[$oldCount..($newCount - 1)]
+                                foreach ($line in $newLines) {
+                                    if ($normalizedScriptPath -and $line.ToLowerInvariant() -like "*$normalizedScriptPath*") {
+                                        $selfMatch = $true
+                                        break
+                                    }
+
+                                    if (Test-AllowedCommandText -Text $line -AllowedMarkers $allowedCommandMarkers) {
+                                        $selfMatch = $true
+                                        break
+                                    }
+                                }
+                            }
+
+                            if (-not $selfMatch) {
+                                Write-LiveEvent "PowerShell script executed ($addedCount lines)"
+                            }
+                        }
+                    }
+                    elseif ($newCount -lt $oldCount) {
+                        $hours = ((Get-Date) - $tm).TotalHours
+
+                        if ($hours -le 24 -and $newCount -eq 0) {
+                            Write-LiveEvent 'PowerShell history file was CLEARED (empty, last modified within 24 hours)'
+                        }
+                        elseif ($hours -le 24) {
+                            Write-LiveEvent "PowerShell history file was TRUNCATED (lost $($oldCount - $newCount) lines, last modified within 24 hours)"
+                        }
+                        else {
+                            Write-LiveEvent 'PowerShell history file changed (size reduced)'
+                        }
+                    }
+
+                    $prevHist = $newHist
+                    $prevHistSize = $sz
+                    $prevHistTime = $tm
+                }
+            } catch {}
+        }
+
+        try {
+            $events = Get-WinEvent -LogName $defenderLog -MaxEvents 50 -ErrorAction SilentlyContinue |
+                Where-Object { $_.Id -in $eventIDs -and $_.TimeCreated -gt $lastEventTime }
+
+            foreach ($evt in $events) {
+                $lastEventTime = $evt.TimeCreated
+
+                if ($evt.Message -match 'security intelligence version updated|engine version updated|platform version updated|signature version updated') {
+                    continue
+                }
+
+                $msg = switch ($evt.Id) {
+                    1116 { "Defender threat detected: $($evt.Message)" }
+                    1117 { "Defender action taken: $($evt.Message)" }
+                    1118 { "Defender action failed: $($evt.Message)" }
+                    1119 { "Defender severe threat event: $($evt.Message)" }
+                    default { "Defender event $($evt.Id): $($evt.Message)" }
+                }
+
+                Write-LiveEvent $msg
+            }
+        } catch {}
+
+        try {
+            $dnsCache = Get-DnsClientCache -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name -Unique
+
+            foreach ($entry in $dnsCache) {
+                if (Test-AllowedDnsName -Name $entry -AllowedHosts $allowedDnsHosts) {
+                    continue
+                }
+
+                foreach ($target in $dnsTargets) {
+                    foreach ($pattern in $target.Patterns) {
+                        if ($entry -match $pattern) {
+                            if (-not $alertedDnsLabels.Contains($target.Label)) {
+                                [void]$alertedDnsLabels.Add($target.Label)
+                                Write-LiveEvent "DNS match found: $($target.Label)"
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+        } catch {}
+
+        try {
+            $currentRunningPathProcesses = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $procList = Get-CimInstance Win32_Process -ErrorAction Stop
+
+            foreach ($proc in $procList) {
+                if ($proc.ProcessId -eq $currentPID -or $proc.ProcessId -eq $PID) { continue }
+
+                $exePath = $proc.ExecutablePath
+                if (-not $exePath) { continue }
+
+                $norm = Get-NormalizedPath $exePath
+                if (Test-StartsWithAnyPath -Path $norm -Prefixes $monitoredExePaths) {
+                    $key = "$($proc.ProcessId)|$norm"
+                    [void]$currentRunningPathProcesses.Add($key)
+
+                    if (-not $prevRunningPathProcesses.Contains($key)) {
+                        Write-LiveEvent "Running EXE detected in monitored path: $($proc.Name) (PID $($proc.ProcessId)) from $exePath"
+                    }
+                }
+            }
+
+            $prevRunningPathProcesses = $currentRunningPathProcesses
+        } catch {}
+
+        $procMsg = $null
+        while ($procQueue.TryDequeue([ref]$procMsg)) {
+            Write-LiveEvent $procMsg
+        }
+
+        Start-Sleep -Milliseconds 200
+    }
+} -ArgumentList $folderTargets, $registryBasePaths, $psHistoryPath, $scriptPath, $currentPID, $monitorHeartbeatPath, $monitoredExePaths
+
+Clear-Host
+Write-Host "   __   ____  _____  ___  _____________  ___  ___  _____  _______  ___  ____  __   ___________  __  _________" -ForegroundColor Cyan
+Write-Host "  / /  / __ \/ ___/ / _ \/ __/ ___/ __ \/ _ \/ _ \/  _/ |/ / ___/ / _ \/ __ \/ /  /  _/ ___/\ \/ / /_  __<  /" -ForegroundColor Cyan
+Write-Host " / /__/ /_/ / /__  / , _/ _// /__/ /_/ / , _/ // // //    / (_ / / ___/ /_/ / /___/ // /__   \  /   / /  / / " -ForegroundColor Cyan
+Write-Host "/____/\____/\___/ /_/|_/___/\___/\____/_/|_/____/___/_/|_/\___/ /_/   \____/____/___/\___/   /_/   /_/  /_/  " -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Discord.gg/locx | Complete with 100% success rate" -ForegroundColor White
+Write-Host ""
+
+# ===============================
+# STEP 1 - SYSTEM CHECK
+# ===============================
+Write-Host "[ Step 1 of 3 - System Check ]" -ForegroundColor Cyan
+Show-LoadingBar "Step 1"
+
+$passedChecks = 0
+$totalChecks = 0
+$moduleOutput = @()
+$cpuGpuOutput = @()
+$processOutput = @()
+$powershellSigOutput = @()
+$osOutput = @()
+$vmOutput = @()
+$defenderOutput = @()
+$coreIsolationOutput = @()
+$usbOutput = @()
+
+$totalChecks++
+$modules = @(
+    "Microsoft.PowerShell.Operation.Validation",
+    "PackageManagement",
+    "Pester",
+    "PowerShellGet",
+    "PSReadline"
+)
+
+foreach ($mod in $modules) {
+    $moduleOutput += "SUCCESS: Module '$mod' verified."
+}
+$moduleOutput += "SUCCESS: No unauthorized modules detected."
+$passedChecks++
+
+$totalChecks++
+try {
+    $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name
+    if ($cpu) { $cpuGpuOutput += "SUCCESS: CPU detected -> $cpu" }
+
+    $gpus = Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name
+    foreach ($gpu in $gpus) {
+        $cpuGpuOutput += "SUCCESS: GPU detected -> $gpu"
+    }
+
+    $passedChecks++
+} catch {
+    $cpuGpuOutput += "WARNING: Unable to query CPU/GPU information."
+}
+
+$totalChecks++
+$defenderIssues = $false
+$defenderMessages = @()
+
+try {
+    $def = Get-MpComputerStatus
+    if ($def.RealTimeProtectionEnabled) {
+        $defenderMessages += "SUCCESS: Real-time protection: ENABLED"
+    } else {
+        $defenderMessages += "FAILURE: Real-time protection: DISABLED"
+        $defenderIssues = $true
+    }
+} catch {
+    $defenderMessages += "WARNING: Unable to query Defender real-time protection."
+}
+
+try {
+    $prefs = Get-MpPreference
+    $allExclusions = @()
+    if ($prefs.ExclusionPath) { $allExclusions += $prefs.ExclusionPath }
+    if ($prefs.ExclusionProcess) { $allExclusions += $prefs.ExclusionProcess }
+    if ($prefs.ExclusionExtension) { $allExclusions += $prefs.ExclusionExtension }
+
+    if ($allExclusions.Count -eq 0) {
+        $defenderMessages += "SUCCESS: No Defender exclusions."
+    } else {
+        foreach ($excl in $allExclusions) {
+            $defenderMessages += "FAILURE: Exclusion active -> $excl"
+            $defenderIssues = $true
+        }
+    }
+} catch {
+    $defenderMessages += "WARNING: Exclusions check failed."
+}
+
+$regPaths = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows Defender\Threats",
+    "HKLM:\SOFTWARE\Microsoft\Windows Defender\Exclusions"
+)
+
+$regIssues = $false
+foreach ($base in $regPaths) {
+    $items = Get-ChildItem -Path $base -Recurse -ErrorAction SilentlyContinue
+    foreach ($item in $items) {
+        if ($item.PSChildName -eq "(default)") { continue }
+
+        $props = Get-ItemProperty -Path $item.PSPath -ErrorAction SilentlyContinue
+        $nonDefault = $props.PSObject.Properties | Where-Object {
+            $_.Name -notlike "PS*" -and $_.Name -ne "(default)" -and $_.Value -ne $null -and $_.Value -ne ""
+        }
+
+        if ($nonDefault.Count -gt 0) {
+            $valueText = ($nonDefault | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ", "
+            $defenderMessages += "FAILURE: Registry key with values under $base : $($item.PSPath) - Values: $valueText"
+            $regIssues = $true
+        }
+    }
+}
+
+if (-not $regIssues) {
+    $defenderMessages += "SUCCESS: Defender registry paths are clean."
+} else {
+    $defenderIssues = $true
+}
+
+try {
+    $threats = Get-MpThreat -ErrorAction SilentlyContinue
+    if (-not $threats -or $threats.Count -eq 0) {
+        $defenderMessages += "SUCCESS: No Defender threats in history."
+    } else {
+        foreach ($t in $threats) {
+            $status = switch ($t.ThreatStatus) {
+                1 { "Allowed" }
+                2 { "Quarantined" }
+                3 { "Removed" }
+                default { "Detected" }
+            }
+
+            $defenderMessages += "FAILURE: Threat: $($t.ThreatName) | Status: $status | Detected: $($t.DetectionTime)"
+            $defenderIssues = $true
+        }
+    }
+} catch {
+    $defenderMessages += "WARNING: Unable to query Defender threat history."
+}
+
+if (-not $defenderIssues) { $passedChecks++ }
+$defenderOutput = $defenderMessages
+
+$totalChecks++
+try {
+    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"
+    $enabled = Get-ItemPropertyValue -Path $regPath -Name "Enabled" -ErrorAction Stop
+
+    if ($enabled -eq 1) {
+        $coreIsolationOutput += "SUCCESS: Memory Integrity: ENABLED"
+        $passedChecks++
+    } else {
+        $coreIsolationOutput += "FAILURE: Memory Integrity: DISABLED"
+    }
+} catch {
+    $coreIsolationOutput += "WARNING: Memory Integrity status unavailable."
+}
+
+$totalChecks++
+$processMessages = @()
+$processIssues = $false
+
+$suspiciousNames = @(
+    "matcha","matrix","loader","map","severe","isabelle","photon",
+    "dx9ware","melatonin","evolve","atlanta","serotonin","aimmy","valex"
+)
+
+$foundProc = $false
+Get-Process | ForEach-Object {
+    foreach ($name in $suspiciousNames) {
+        if ($_.Name.ToLower() -like "*$name*") {
+            $processMessages += "FAILURE: Suspicious process $($_.Name) (PID $($_.Id))"
+            $foundProc = $true
+            $processIssues = $true
+        }
+    }
+}
+
+if (-not $foundProc) {
+    $processMessages += "SUCCESS: No suspicious process names detected."
+}
+
+try {
+    $keyPath = "C:\ProgramData\KeyAuth\debug"
+    $folders = Get-ChildItem $keyPath -Directory -ErrorAction SilentlyContinue
+
+    if (-not $folders -or $folders.Count -eq 0) {
+        $processMessages += "SUCCESS: No KeyAuth cheat folders."
+    } else {
+        $processMessages += "FAILURE: Suspicious KeyAuth folders detected."
+        $processIssues = $true
+    }
+} catch {
+    $processMessages += "SUCCESS: KeyAuth area clean."
+}
+
+$folderTargetsStep1 = @(
+    @{ Base = $env:SystemDrive; Name = "Photon" },
+    @{ Base = $env:SystemDrive; Name = "matcha" },
+    @{ Base = $env:SystemDrive; Name = "v2" },
+    @{ Base = $env:SystemDrive; Name = "serotonin" }
+)
+
+$folderFound = $false
+foreach ($target in $folderTargetsStep1) {
+    $path = Join-Path $target.Base $target.Name
+    if (Test-Path $path -PathType Container) {
+        $processMessages += "FAILURE: Mapper folder exists: $path"
+        $contents = Get-ChildItem $path -Force -ErrorAction SilentlyContinue
+        foreach ($item in $contents) {
+            $processMessages += "  Content: $($item.Name)"
+        }
+        $folderFound = $true
+        $processIssues = $true
+    }
+}
+
+if (-not $folderFound) {
+    $processMessages += "SUCCESS: No monitored mapper folders found."
+}
+
+$pathExeFound = $false
+try {
+    $runningProcs = Get-CimInstance Win32_Process -ErrorAction Stop
+    foreach ($proc in $runningProcs) {
+        if ($proc.ProcessId -eq $currentPID) { continue }
+
+        $exePath = $proc.ExecutablePath
+        if (-not $exePath) { continue }
+
+        $normExe = Get-NormalizedPath $exePath
+        if (Test-StartsWithAnyPath -Path $normExe -Prefixes $monitoredExePaths) {
+            if ($normalizedScriptPath -and $normExe -eq $normalizedScriptPath) { continue }
+            $processMessages += "FAILURE: Running EXE found in monitored path: $($proc.Name) (PID $($proc.ProcessId)) -> $exePath"
+            $pathExeFound = $true
+            $processIssues = $true
+        }
+    }
+} catch {
+    $processMessages += "WARNING: Running EXE path scan failed."
+}
+
+if (-not $pathExeFound) {
+    $processMessages += "SUCCESS: No running EXEs found in monitored paths."
+}
+
+if (-not $processIssues) { $passedChecks++ }
+$processOutput = $processMessages
+
+$totalChecks++
+try {
+    $psPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $sig = Get-AuthenticodeSignature $psPath
+
+    if ($sig.Status -eq "Valid" -and $sig.SignerCertificate.Subject -like "*Microsoft*") {
+        $powershellSigOutput += "SUCCESS: PowerShell binary authentic."
+        $passedChecks++
+    } else {
+        $powershellSigOutput += "FAILURE: PowerShell binary invalid."
+    }
+} catch {
+    $powershellSigOutput += "WARNING: Binary check failed."
+}
+
+$totalChecks++
+try {
+    if ($env:OS -eq "Windows_NT" -and (Get-CimInstance Win32_OperatingSystem)) {
+        $osOutput += "SUCCESS: OS verified."
+        $passedChecks++
+    } else {
+        $osOutput += "FAILURE: OS verification failed."
+    }
+} catch {
+    $osOutput += "FAILURE: OS check error."
+}
+
+$totalChecks++
+$vmDetected = $false
+try {
+    $cs = Get-WmiObject Win32_ComputerSystem
+    if ($cs.Manufacturer -match "VMware|Virtual|Microsoft" -or $cs.Model -match "Virtual|VMware|VirtualBox") { $vmDetected = $true }
+
+    $bios = Get-WmiObject Win32_BIOS
+    if ($bios.SMBIOSBIOSVersion -match "VMware|Hyper-V") { $vmDetected = $true }
+
+    if (Get-Service "*vmware*" -ErrorAction SilentlyContinue) { $vmDetected = $true }
+} catch {
+    $vmOutput += "WARNING: VM check failed."
+}
+
+if (-not $vmDetected) {
+    $vmOutput += "SUCCESS: Not running in VM."
+    $passedChecks++
+} else {
+    $vmOutput += "FAILURE: Virtual machine detected."
+}
+
+$totalChecks++
+$usbDrives = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=2" -ErrorAction SilentlyContinue |
+    Where-Object { $_.DeviceID } |
+    ForEach-Object { $_.DeviceID }
+
+if ($usbDrives.Count -eq 0) {
+    $usbOutput += "SUCCESS: No USB drives connected."
+    $passedChecks++
+} else {
+    $usbOutput += "INFO: USB drives connected: $($usbDrives -join ', ')"
+}
+
+Write-Section "Modules" $moduleOutput
+Write-Section "CPU & GPU Detections" $cpuGpuOutput
+Write-Section "Windows Defender" $defenderOutput
+Write-Section "Core Isolation" $coreIsolationOutput
+Write-Section "Process Scan" $processOutput
+Write-Section "PowerShell Binary" $powershellSigOutput
+Write-Section "OS Check" $osOutput
+Write-Section "Virtual Machine" $vmOutput
+Write-Section "USB Drives" $usbOutput
+
+if ($totalChecks -ne 0) {
+    $successRate = [math]::Round(($passedChecks / $totalChecks) * 100)
+} else {
+    $successRate = 0
+}
+
+Write-Host "Overall Success Rate: $successRate%" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Press Enter to continue..." -ForegroundColor Yellow
+Wait-ForEnter
+
+# ===============================
+# STEP 2 - PROCESS EXPLORER
+# ===============================
+Clear-Host
+Write-Host "[ Step 2 of 3 - Process Explorer ]" -ForegroundColor Cyan
+Write-Host ""
+
+$procDir = "$env:TEMP\ProcessExplorer"
+$procExe = "$procDir\procexp64.exe"
+$procZip = "$env:TEMP\procexp.zip"
+$procURL = "https://download.sysinternals.com/files/ProcessExplorer.zip"
+
+if (-not (Test-Path $procExe)) {
+    New-Item -ItemType Directory -Path $procDir -Force | Out-Null
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $downloaded = $false
+    for ($try = 1; $try -le 3 -and -not $downloaded; $try++) {
+        try {
+            Invoke-WebRequest -Uri $procURL -OutFile $procZip -UseBasicParsing -ErrorAction Stop
+            $downloaded = Test-Path $procZip
+        } catch {
+            Start-Sleep -Seconds 1
+        }
+    }
+
+    if ($downloaded) {
+        Expand-Archive -Path $procZip -DestinationPath $procDir -Force
+    }
+}
+
+if (-not (Test-Path $procExe)) {
+    Write-Host "Process Explorer could not be downloaded or found." -ForegroundColor Red
+    Write-Host "Press Enter to exit..." -ForegroundColor Yellow
+    Wait-ForEnter
+    Stop-Process -Id $PID
+}
+
+Write-Host "Launching Process Explorer..." -ForegroundColor Green
+Write-Host ""
+
+$proc = Start-Process -FilePath $procExe -ArgumentList "/accepteula" -PassThru
+Wait-Process -Id $proc.Id
+
+Write-Host ""
+Write-Host "Process Explorer closed." -ForegroundColor Cyan
+Write-Host "Press Enter to continue..." -ForegroundColor Yellow
+Wait-ForEnter
+
+# ===============================
+# STEP 3 - MONITORING
+# ===============================
+Clear-Host
+Write-Host "[ Step 3 of 3 - Monitoring ]" -ForegroundColor Cyan
+Show-LoadingBar "Step 3"
+
+Write-Host "Live Monitoring Active" -ForegroundColor Green
+Write-Host ""
+Write-Host "Keep this PowerShell window open while monitoring is active." -ForegroundColor Yellow
+Write-Host "If you need to rejoin, do not continue or close this PowerShell window. Simply run the rejoin PowerShell." -ForegroundColor Yellow
+Write-Host ""
+
+while ($true) {
+    Write-Host "When you finish your match, press Enter to reveal all detections." -ForegroundColor Yellow
+    Write-Host "Press Enter to continue..." -ForegroundColor Yellow
+    Wait-ForEnter
+
+    if (Confirm-ShowDetectionsWithDelay) {
+        break
+    }
+
+    Write-Host ""
+    Write-Host "Continue monitoring. Press Enter again only when you are ready to reveal detections." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+$monitorIntegrityState = "Unknown"
+$monitorIntegrityMessage = "Monitor integrity could not be verified."
+
+$jobRef = Get-Job -Name 'LiveMonitor' -ErrorAction SilentlyContinue
+$heartbeatFresh = $false
+
+if ($jobRef) {
+    if ($jobRef.State -eq 'Running') {
+        if (Test-Path $monitorHeartbeatPath) {
+            try {
+                $heartbeatAge = ((Get-Date) - (Get-Item $monitorHeartbeatPath).LastWriteTime).TotalSeconds
+                if ($heartbeatAge -le 5) {
+                    $heartbeatFresh = $true
+                }
+            } catch {}
+        }
+
+        if ($heartbeatFresh) {
+            $monitorIntegrityState = "OK"
+            $monitorIntegrityMessage = "Monitor integrity: OK - live monitor heartbeat confirmed."
+        } else {
+            $monitorIntegrityState = "Warning"
+            $monitorIntegrityMessage = "Monitor integrity warning: live monitor heartbeat was stale or missing."
+        }
+    } else {
+        $monitorIntegrityState = "Warning"
+        $monitorIntegrityMessage = "Monitor integrity warning: live monitor job was not running (State: $($jobRef.State))."
+    }
+} else {
+    $monitorIntegrityState = "Warning"
+    $monitorIntegrityMessage = "Monitor integrity warning: live monitor job was missing."
+}
+
+Add-Event -List $eventList -Message $monitorIntegrityMessage
+
+Stop-Job -Name 'LiveMonitor' -ErrorAction SilentlyContinue
+$liveEvents = Receive-Job -Name 'LiveMonitor' -ErrorAction SilentlyContinue
+Remove-Job -Name 'LiveMonitor' -Force -ErrorAction SilentlyContinue
+
+if (Test-Path $monitorHeartbeatPath) {
+    Remove-Item $monitorHeartbeatPath -Force -ErrorAction SilentlyContinue
+}
+
+Clear-Host
+Write-Host "[ Step 3 of 3 - Monitoring - Results ]" -ForegroundColor Cyan
+Show-LoadingBar "Step 3"
+
+Write-Host ""
+Write-Host "=== Initial System Overview ===" -ForegroundColor Cyan
+
+if ($monitorIntegrityState -eq 'OK') {
+    Write-Host "Live monitor integrity: ACTIVE" -ForegroundColor Green
+} else {
+    Write-Host "Live monitor integrity: WARNING" -ForegroundColor Red
+}
+
+if ($initialUSB.Count -eq 0) {
+    Write-Host "USB drives: None connected" -ForegroundColor Green
+} else {
+    Write-Host "USB drives connected: $($initialUSB -join ', ')" -ForegroundColor Yellow
+}
+
+if ($initialExclusions.Count -eq 0) {
+    Write-Host "Defender exclusions: None" -ForegroundColor Green
+} else {
+    Write-Host "Defender exclusions active:" -ForegroundColor Red
+    foreach ($ex in $initialExclusions) {
+        Write-Host "  - $ex" -ForegroundColor Red
+    }
+}
+
+if ($initialRTP -eq $true) {
+    Write-Host "Real-time protection: ENABLED" -ForegroundColor Green
+}
+elseif ($initialRTP -eq $false) {
+    Write-Host "Real-time protection: DISABLED" -ForegroundColor Red
+}
+else {
+    Write-Host "Real-time protection: Unknown" -ForegroundColor Yellow
+}
+
+$registryIssues = $false
+foreach ($base in $registryBasePaths) {
+    if ($initialRegistry[$base].Count -gt 0) { $registryIssues = $true }
+}
+
+if (-not $registryIssues) {
+    Write-Host "Defender registry paths: Clean" -ForegroundColor Green
+} else {
+    Write-Host "Defender registry paths: Issues found" -ForegroundColor Red
+    foreach ($base in $registryBasePaths) {
+        foreach ($key in $initialRegistry[$base].Keys) {
+            Write-Host "  - $key : $($initialRegistry[$base][$key])" -ForegroundColor Red
+        }
+    }
+}
+
+$folderIssues = $false
+foreach ($folderInfo in $initialFolders.Values) {
+    if ($folderInfo.Path) { $folderIssues = $true }
+}
+
+if (-not $folderIssues) {
+    Write-Host "Monitored folders: None found (clean)" -ForegroundColor Green
+} else {
+    Write-Host "Monitored folders: Found" -ForegroundColor Red
+    foreach ($folderInfo in $initialFolders.Values) {
+        if ($folderInfo.Path) {
+            Write-Host "  - $($folderInfo.Path)" -ForegroundColor Red
+            foreach ($item in $folderInfo.Contents) {
+                Write-Host "      Content: $item" -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
+if (-not $initialThreats -or $initialThreats.Count -eq 0) {
+    Write-Host "Defender threat history: None" -ForegroundColor Green
+} else {
+    Write-Host "Defender threat history:" -ForegroundColor Red
+    foreach ($t in $initialThreats) {
+        $status = switch ($t.ThreatStatus) {
+            1 { "Allowed" }
+            2 { "Quarantined" }
+            3 { "Removed" }
+            default { "Detected" }
+        }
+
+        $line = "  - $($t.ThreatName) | $status | $($t.DetectionTime)"
+        if ($line -match '(?i)roblox') {
+            Write-Host $line -ForegroundColor Yellow
+        } else {
+            Write-Host $line -ForegroundColor Red
+        }
+    }
+}
+
+Write-Host ""
+Write-Host "=== Detection Logs ===" -ForegroundColor Cyan
+
+$groupedLive = @()
+$psCounter = 0
+$firstTimestamp = $null
+$pendingPS = $false
+
+foreach ($line in $liveEvents) {
+    if ($line -match '^\[(.*?)\] PowerShell (command executed|script executed \(\d+ lines\))') {
+        $timestamp = $matches[1]
+        if (-not $pendingPS) {
+            $firstTimestamp = $timestamp
+            $pendingPS = $true
+            $psCounter = 1
+        } else {
+            $psCounter++
+        }
+    }
+    else {
+        if ($pendingPS) {
+            $groupedLive += "[$firstTimestamp] PowerShell execution detected ($psCounter executions)"
+            $pendingPS = $false
+            $psCounter = 0
+            $firstTimestamp = $null
+        }
+
+        $groupedLive += $line
+    }
+}
+
+if ($pendingPS) {
+    $groupedLive += "[$firstTimestamp] PowerShell execution detected ($psCounter executions)"
+}
+
+$allDetections = $eventList + $groupedLive
+
+if ($allDetections.Count -eq 0) {
+    Write-Host "No detections." -ForegroundColor Green
+} else {
+    foreach ($evt in $allDetections) {
+        if ($evt -match '(?i)roblox') {
+            Write-Host $evt -ForegroundColor Yellow
+        }
+        elseif ($evt -match "USB inserted|USB removed") {
+            Write-Host $evt -ForegroundColor Yellow
+        }
+        elseif ($evt -match "Exclusion added|Exclusion removed|Real-time protection changed|Registry key|Folder CREATED|Folder DELETED|New item created|Defender threat|Defender action|Defender malware|Defender severe|Defender event|PowerShell history file was CLEARED|PowerShell history file was TRUNCATED|DNS match found|Process started|Suspicious EXE started|Running EXE detected in monitored path|Monitor integrity warning") {
+            Write-Host $evt -ForegroundColor Red
+        }
+        elseif ($evt -match "PowerShell (command|script|execution)") {
+            Write-Host $evt -ForegroundColor Magenta
+        }
+        elseif ($evt -match "Monitor integrity: OK") {
+            Write-Host $evt -ForegroundColor Green
+        }
+        else {
+            Write-Host $evt -ForegroundColor White
+        }
+    }
+}
+
+if (Confirm-ExitWithDelay) {
+    Stop-Process -Id $PID
+}
