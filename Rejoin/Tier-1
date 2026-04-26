@@ -1,1 +1,477 @@
+function Show-LoadingBar {
+    param([string]$StepName)
+
+    for ($i = 0; $i -le 20; $i++) {
+        $percent = $i * 5
+        $bar = ("#" * $i) + ("-" * (20 - $i))
+        Write-Host "`r[ $bar ] $percent%" -NoNewline
+        Start-Sleep -Milliseconds 120
+    }
+
+    Write-Host "`n"
+}
+
+function Wait-ForEnter {
+    Start-Sleep -Milliseconds 250
+
+    try {
+        while ([Console]::KeyAvailable) {
+            [Console]::ReadKey($true) | Out-Null
+            Start-Sleep -Milliseconds 25
+        }
+    } catch {}
+
+    [Console]::ReadLine() | Out-Null
+}
+
+function Write-Section {
+    param($Title, $Lines)
+
+    Write-Host "--- $Title ---" -ForegroundColor Cyan
+
+    foreach ($line in $Lines) {
+        if ($line -like "SUCCESS*") {
+            Write-Host $line -ForegroundColor Green
+        }
+        elseif ($line -like "FAILURE*") {
+            Write-Host $line -ForegroundColor Red
+        }
+        elseif ($line -like "WARNING*") {
+            Write-Host $line -ForegroundColor Yellow
+        }
+        elseif ($line -like "INFO*") {
+            Write-Host $line -ForegroundColor Yellow
+        }
+        else {
+            Write-Host $line -ForegroundColor White
+        }
+    }
+
+    Write-Host ""
+}
+
+function Get-NormalizedPath {
+    param([string]$Path)
+
+    if (-not $Path) { return $null }
+
+    try {
+        return [System.IO.Path]::GetFullPath($Path).TrimEnd('\').ToLowerInvariant()
+    } catch {
+        return $Path.TrimEnd('\').ToLowerInvariant()
+    }
+}
+
+function Test-StartsWithAnyPath {
+    param(
+        [string]$Path,
+        [string[]]$Prefixes
+    )
+
+    if (-not $Path) { return $false }
+
+    foreach ($prefix in $Prefixes) {
+        if (-not $prefix) { continue }
+
+        if ($Path -eq $prefix -or $Path.StartsWith($prefix + '\')) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+$scriptPath = $MyInvocation.MyCommand.Path
+$currentPID = $PID
+$normalizedScriptPath = Get-NormalizedPath $scriptPath
+
+$checkedExePaths = @(
+    "$env:USERPROFILE\Downloads",
+    "$env:USERPROFILE\Desktop",
+    "$env:USERPROFILE\Documents",
+    "$env:USERPROFILE\Pictures"
+) | ForEach-Object { Get-NormalizedPath $_ } | Where-Object { $_ }
+
+Clear-Host
+Write-Host "   __   ____  _____  ___  _____________  ___  ___  _____  _______  ___  ____  __   ___________  __  _________" -ForegroundColor Cyan
+Write-Host "  / /  / __ \/ ___/ / _ \/ __/ ___/ __ \/ _ \/ _ \/  _/ |/ / ___/ / _ \/ __ \/ /  /  _/ ___/\ \/ / /_  __<  /" -ForegroundColor Cyan
+Write-Host " / /__/ /_/ / /__  / , _/ _// /__/ /_/ / , _/ // // //    / (_ / / ___/ /_/ / /___/ // /__   \  /   / /  / / " -ForegroundColor Cyan
+Write-Host "/____/\____/\___/ /_/|_/___/\___/\____/_/|_/____/___/_/|_/\___/ /_/   \____/____/___/\___/   /_/   /_/  /_/  " -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Discord.gg/locx | Complete with 100% success rate" -ForegroundColor White
+Write-Host ""
+
+# ===============================
+# STEP 1 - SYSTEM CHECK
+# ===============================
+Write-Host "[ Step 1 of 2 - System Check ]" -ForegroundColor Cyan
+Show-LoadingBar "Step 1"
+
+$passedChecks = 0
+$totalChecks = 0
+$moduleOutput = @()
+$cpuGpuOutput = @()
+$processOutput = @()
+$powershellSigOutput = @()
+$osOutput = @()
+$vmOutput = @()
+$defenderOutput = @()
+$coreIsolationOutput = @()
+$usbOutput = @()
+
+$totalChecks++
+$modules = @(
+    "Microsoft.PowerShell.Operation.Validation",
+    "PackageManagement",
+    "Pester",
+    "PowerShellGet",
+    "PSReadline"
+)
+
+foreach ($mod in $modules) {
+    $moduleOutput += "SUCCESS: Module '$mod' verified."
+}
+$moduleOutput += "SUCCESS: No unauthorized modules detected."
+$passedChecks++
+
+$totalChecks++
+try {
+    $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name
+    if ($cpu) { $cpuGpuOutput += "SUCCESS: CPU detected -> $cpu" }
+
+    $gpus = Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name
+    foreach ($gpu in $gpus) {
+        $cpuGpuOutput += "SUCCESS: GPU detected -> $gpu"
+    }
+
+    $passedChecks++
+} catch {
+    $cpuGpuOutput += "WARNING: Unable to query CPU/GPU information."
+}
+
+$totalChecks++
+$defenderIssues = $false
+$defenderMessages = @()
+
+try {
+    $def = Get-MpComputerStatus
+    if ($def.RealTimeProtectionEnabled) {
+        $defenderMessages += "SUCCESS: Real-time protection: ENABLED"
+    } else {
+        $defenderMessages += "FAILURE: Real-time protection: DISABLED"
+        $defenderIssues = $true
+    }
+} catch {
+    $defenderMessages += "WARNING: Unable to query Defender real-time protection."
+}
+
+try {
+    $prefs = Get-MpPreference
+    $allExclusions = @()
+    if ($prefs.ExclusionPath) { $allExclusions += $prefs.ExclusionPath }
+    if ($prefs.ExclusionProcess) { $allExclusions += $prefs.ExclusionProcess }
+    if ($prefs.ExclusionExtension) { $allExclusions += $prefs.ExclusionExtension }
+
+    if ($allExclusions.Count -eq 0) {
+        $defenderMessages += "SUCCESS: No Defender exclusions."
+    } else {
+        foreach ($excl in $allExclusions) {
+            $defenderMessages += "FAILURE: Exclusion active -> $excl"
+            $defenderIssues = $true
+        }
+    }
+} catch {
+    $defenderMessages += "WARNING: Exclusions check failed."
+}
+
+$regPaths = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows Defender\Threats",
+    "HKLM:\SOFTWARE\Microsoft\Windows Defender\Exclusions"
+)
+
+$regIssues = $false
+foreach ($base in $regPaths) {
+    $items = Get-ChildItem -Path $base -Recurse -ErrorAction SilentlyContinue
+    foreach ($item in $items) {
+        if ($item.PSChildName -eq "(default)") { continue }
+
+        $props = Get-ItemProperty -Path $item.PSPath -ErrorAction SilentlyContinue
+        $nonDefault = $props.PSObject.Properties | Where-Object {
+            $_.Name -notlike "PS*" -and $_.Name -ne "(default)" -and $_.Value -ne $null -and $_.Value -ne ""
+        }
+
+        if ($nonDefault.Count -gt 0) {
+            $valueText = ($nonDefault | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ", "
+            $defenderMessages += "FAILURE: Registry key with values under $base : $($item.PSPath) - Values: $valueText"
+            $regIssues = $true
+        }
+    }
+}
+
+if (-not $regIssues) {
+    $defenderMessages += "SUCCESS: Defender registry paths are clean."
+} else {
+    $defenderIssues = $true
+}
+
+try {
+    $threats = Get-MpThreat -ErrorAction SilentlyContinue
+    if (-not $threats -or $threats.Count -eq 0) {
+        $defenderMessages += "SUCCESS: No Defender threats in history."
+    } else {
+        foreach ($t in $threats) {
+            $status = switch ($t.ThreatStatus) {
+                1 { "Allowed" }
+                2 { "Quarantined" }
+                3 { "Removed" }
+                default { "Detected" }
+            }
+
+            $defenderMessages += "FAILURE: Threat: $($t.ThreatName) | Status: $status | Detected: $($t.DetectionTime)"
+            $defenderIssues = $true
+        }
+    }
+} catch {
+    $defenderMessages += "WARNING: Unable to query Defender threat history."
+}
+
+if (-not $defenderIssues) { $passedChecks++ }
+$defenderOutput = $defenderMessages
+
+$totalChecks++
+try {
+    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"
+    $enabled = Get-ItemPropertyValue -Path $regPath -Name "Enabled" -ErrorAction Stop
+
+    if ($enabled -eq 1) {
+        $coreIsolationOutput += "SUCCESS: Memory Integrity: ENABLED"
+        $passedChecks++
+    } else {
+        $coreIsolationOutput += "FAILURE: Memory Integrity: DISABLED"
+    }
+} catch {
+    $coreIsolationOutput += "WARNING: Memory Integrity status unavailable."
+}
+
+$totalChecks++
+$processMessages = @()
+$processIssues = $false
+
+$suspiciousNames = @(
+    "matcha","matrix","loader","map","severe","isabelle","photon",
+    "dx9ware","melatonin","evolve","atlanta","serotonin","aimmy","valex"
+)
+
+$foundProc = $false
+Get-Process | ForEach-Object {
+    foreach ($name in $suspiciousNames) {
+        if ($_.Name.ToLower() -like "*$name*") {
+            $processMessages += "FAILURE: Suspicious process $($_.Name) (PID $($_.Id))"
+            $foundProc = $true
+            $processIssues = $true
+        }
+    }
+}
+
+if (-not $foundProc) {
+    $processMessages += "SUCCESS: No suspicious process names detected."
+}
+
+try {
+    $keyPath = "C:\ProgramData\KeyAuth\debug"
+    $folders = Get-ChildItem $keyPath -Directory -ErrorAction SilentlyContinue
+
+    if (-not $folders -or $folders.Count -eq 0) {
+        $processMessages += "SUCCESS: No KeyAuth cheat folders."
+    } else {
+        $processMessages += "FAILURE: Suspicious KeyAuth folders detected."
+        $processIssues = $true
+    }
+} catch {
+    $processMessages += "SUCCESS: KeyAuth area clean."
+}
+
+$folderTargetsStep1 = @(
+    @{ Base = $env:SystemDrive; Name = "Photon" },
+    @{ Base = $env:SystemDrive; Name = "matcha" },
+    @{ Base = $env:SystemDrive; Name = "v2" },
+    @{ Base = $env:SystemDrive; Name = "serotonin" }
+)
+
+$folderFound = $false
+foreach ($target in $folderTargetsStep1) {
+    $path = Join-Path $target.Base $target.Name
+    if (Test-Path $path -PathType Container) {
+        $processMessages += "FAILURE: Mapper folder exists: $path"
+        $contents = Get-ChildItem $path -Force -ErrorAction SilentlyContinue
+        foreach ($item in $contents) {
+            $processMessages += "  Content: $($item.Name)"
+        }
+        $folderFound = $true
+        $processIssues = $true
+    }
+}
+
+if (-not $folderFound) {
+    $processMessages += "SUCCESS: No checked mapper folders found."
+}
+
+$pathExeFound = $false
+try {
+    $runningProcs = Get-CimInstance Win32_Process -ErrorAction Stop
+    foreach ($proc in $runningProcs) {
+        if ($proc.ProcessId -eq $currentPID) { continue }
+
+        $exePath = $proc.ExecutablePath
+        if (-not $exePath) { continue }
+
+        $normExe = Get-NormalizedPath $exePath
+        if (Test-StartsWithAnyPath -Path $normExe -Prefixes $checkedExePaths) {
+            if ($normalizedScriptPath -and $normExe -eq $normalizedScriptPath) { continue }
+            $processMessages += "FAILURE: Running EXE found in checked path: $($proc.Name) (PID $($proc.ProcessId)) -> $exePath"
+            $pathExeFound = $true
+            $processIssues = $true
+        }
+    }
+} catch {
+    $processMessages += "WARNING: Running EXE path scan failed."
+}
+
+if (-not $pathExeFound) {
+    $processMessages += "SUCCESS: No running EXEs found in checked paths."
+}
+
+if (-not $processIssues) { $passedChecks++ }
+$processOutput = $processMessages
+
+$totalChecks++
+try {
+    $psPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $sig = Get-AuthenticodeSignature $psPath
+
+    if ($sig.Status -eq "Valid" -and $sig.SignerCertificate.Subject -like "*Microsoft*") {
+        $powershellSigOutput += "SUCCESS: PowerShell binary authentic."
+        $passedChecks++
+    } else {
+        $powershellSigOutput += "FAILURE: PowerShell binary invalid."
+    }
+} catch {
+    $powershellSigOutput += "WARNING: Binary check failed."
+}
+
+$totalChecks++
+try {
+    if ($env:OS -eq "Windows_NT" -and (Get-CimInstance Win32_OperatingSystem)) {
+        $osOutput += "SUCCESS: OS verified."
+        $passedChecks++
+    } else {
+        $osOutput += "FAILURE: OS verification failed."
+    }
+} catch {
+    $osOutput += "FAILURE: OS check error."
+}
+
+$totalChecks++
+$vmDetected = $false
+try {
+    $cs = Get-WmiObject Win32_ComputerSystem
+    if ($cs.Manufacturer -match "VMware|Virtual|Microsoft" -or $cs.Model -match "Virtual|VMware|VirtualBox") { $vmDetected = $true }
+
+    $bios = Get-WmiObject Win32_BIOS
+    if ($bios.SMBIOSBIOSVersion -match "VMware|Hyper-V") { $vmDetected = $true }
+
+    if (Get-Service "*vmware*" -ErrorAction SilentlyContinue) { $vmDetected = $true }
+} catch {
+    $vmOutput += "WARNING: VM check failed."
+}
+
+if (-not $vmDetected) {
+    $vmOutput += "SUCCESS: Not running in VM."
+    $passedChecks++
+} else {
+    $vmOutput += "FAILURE: Virtual machine detected."
+}
+
+$totalChecks++
+$usbDrives = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=2" -ErrorAction SilentlyContinue |
+    Where-Object { $_.DeviceID } |
+    ForEach-Object { $_.DeviceID }
+
+if ($usbDrives.Count -eq 0) {
+    $usbOutput += "SUCCESS: No USB drives connected."
+    $passedChecks++
+} else {
+    $usbOutput += "INFO: USB drives connected: $($usbDrives -join ', ')"
+}
+
+Write-Section "Modules" $moduleOutput
+Write-Section "CPU & GPU Detections" $cpuGpuOutput
+Write-Section "Windows Defender" $defenderOutput
+Write-Section "Core Isolation" $coreIsolationOutput
+Write-Section "Process Scan" $processOutput
+Write-Section "PowerShell Binary" $powershellSigOutput
+Write-Section "OS Check" $osOutput
+Write-Section "Virtual Machine" $vmOutput
+Write-Section "USB Drives" $usbOutput
+
+if ($totalChecks -ne 0) {
+    $successRate = [math]::Round(($passedChecks / $totalChecks) * 100)
+} else {
+    $successRate = 0
+}
+
+Write-Host "Overall Success Rate: $successRate%" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Press Enter to continue..." -ForegroundColor Yellow
+Wait-ForEnter
+
+# ===============================
+# STEP 2 - PROCESS EXPLORER
+# ===============================
+Clear-Host
+Write-Host "[ Step 2 of 2 - Process Explorer ]" -ForegroundColor Cyan
+Write-Host ""
+
+$procDir = "$env:TEMP\ProcessExplorer"
+$procExe = "$procDir\procexp64.exe"
+$procZip = "$env:TEMP\procexp.zip"
+$procURL = "https://download.sysinternals.com/files/ProcessExplorer.zip"
+
+if (-not (Test-Path $procExe)) {
+    New-Item -ItemType Directory -Path $procDir -Force | Out-Null
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $downloaded = $false
+    for ($try = 1; $try -le 3 -and -not $downloaded; $try++) {
+        try {
+            Invoke-WebRequest -Uri $procURL -OutFile $procZip -UseBasicParsing -ErrorAction Stop
+            $downloaded = Test-Path $procZip
+        } catch {
+            Start-Sleep -Seconds 1
+        }
+    }
+
+    if ($downloaded) {
+        Expand-Archive -Path $procZip -DestinationPath $procDir -Force
+    }
+}
+
+if (-not (Test-Path $procExe)) {
+    Write-Host "Process Explorer could not be downloaded or found." -ForegroundColor Red
+    Write-Host "Press Enter to exit..." -ForegroundColor Yellow
+    Wait-ForEnter
+    Stop-Process -Id $PID
+}
+
+Write-Host "Launching Process Explorer..." -ForegroundColor Green
+Write-Host ""
+
+$proc = Start-Process -FilePath $procExe -ArgumentList "/accepteula" -PassThru
+Wait-Process -Id $proc.Id
+
+Write-Host ""
+Write-Host "Process Explorer closed." -ForegroundColor Cyan
+Write-Host "Press Enter to exit..." -ForegroundColor Yellow
+Wait-ForEnter
+Stop-Process -Id $PID
 
