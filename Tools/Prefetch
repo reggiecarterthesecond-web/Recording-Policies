@@ -1,0 +1,345 @@
+# ===============================
+# PREFETCH REVIEW
+# ===============================
+
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Data
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$script:PrefetchPath = Join-Path $env:SystemRoot 'Prefetch'
+try { $script:BootTime = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime } catch { $script:BootTime = [datetime]::MinValue }
+$script:KeywordUrl = 'https://raw.githubusercontent.com/reggiecarterthesecond-web/Recording-Policies/refs/heads/main/Tools/Keywords'
+
+function Get-KeywordList {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    try {
+        $response = Invoke-WebRequest -Uri $script:KeywordUrl -UseBasicParsing -TimeoutSec 8 -Headers @{ 'User-Agent' = 'Mozilla/5.0' }
+        $text = [string]$response.Content
+        $matches = [regex]::Matches($text, "['""]([^'""]+)['""]")
+        $list = New-Object System.Collections.Generic.List[string]
+        foreach ($match in $matches) {
+            $word = $match.Groups[1].Value.Trim()
+            if ($word -and -not $list.Contains($word)) { [void]$list.Add($word) }
+        }
+        return @($list)
+    } catch {
+        return @()
+    }
+}
+
+$script:Keywords = @(Get-KeywordList)
+
+function New-UIFont {
+    param([float]$Size,[switch]$Bold)
+    $style = [System.Drawing.FontStyle]::Regular
+    if ($Bold) { $style = [System.Drawing.FontStyle]::Bold }
+    return New-Object System.Drawing.Font -ArgumentList 'Segoe UI', $Size, $style
+}
+
+function Enable-DoubleBuffer {
+    param([System.Windows.Forms.Control]$Control)
+    try {
+        $prop = $Control.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic')
+        if ($prop) { $prop.SetValue($Control, $true, $null) }
+    } catch {}
+}
+
+function Get-FormSize {
+    try {
+        $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $w = [Math]::Max(980, [int]($area.Width * 0.94))
+        $h = [Math]::Max(620, [int]($area.Height * 0.90))
+        return New-Object System.Drawing.Size($w, $h)
+    } catch {
+        return New-Object System.Drawing.Size(1250, 760)
+    }
+}
+
+function Format-RelativeTime {
+    param([datetime]$Time)
+    $span = (Get-Date) - $Time
+    if ($span.TotalSeconds -lt 10) { return 'Just now' }
+    if ($span.TotalSeconds -lt 60) { return "$([int]$span.TotalSeconds) seconds ago" }
+    if ($span.TotalMinutes -lt 60) {
+        $m = [int]$span.TotalMinutes
+        if ($m -eq 1) { return '1 minute ago' }
+        return "$m minutes ago"
+    }
+    if ($span.TotalHours -lt 24) {
+        $h = [int]$span.TotalHours
+        if ($h -eq 1) { return '1 hour ago' }
+        return "$h hours ago"
+    }
+    $d = [int]$span.TotalDays
+    if ($d -eq 1) { return '1 day ago' }
+    return "$d days ago"
+}
+
+function Wrap-LongText {
+    param([string]$Text,[int]$Limit = 52)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $text = [string]$Text
+    if ($text.Length -le $Limit) { return $text }
+    $chunks = New-Object System.Collections.Generic.List[string]
+    $start = 0
+    while ($start -lt $text.Length) {
+        $remaining = $text.Length - $start
+        $take = [Math]::Min($Limit, $remaining)
+        $chunk = $text.Substring($start, $take)
+        if (($remaining -gt $Limit) -and ($chunk.LastIndexOf('\') -gt 8)) {
+            $cut = $chunk.LastIndexOf('\') + 1
+            $chunks.Add($text.Substring($start, $cut))
+            $start += $cut
+        } else {
+            $chunks.Add($chunk)
+            $start += $take
+        }
+    }
+    return ($chunks -join "`r`n")
+}
+
+function Test-KeywordHit {
+    param([string]$Text)
+    foreach ($keyword in $script:Keywords) {
+        try {
+            if ($Text -match "(?i)$keyword") { return $keyword }
+        } catch {}
+    }
+    return ''
+}
+
+function Get-PrefetchAppName {
+    param([string]$FileName)
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
+    if ($base -match '^(.*)-[A-Fa-f0-9]{8}$') { return $matches[1] }
+    return $base
+}
+
+function New-Table {
+    $table = New-Object System.Data.DataTable
+    foreach ($name in @('RelativeTime','LastRun','Application','FileName','SizeKB','KeywordHit')) {
+        [void]$table.Columns.Add($name)
+    }
+    return ,$table
+}
+
+function Add-TableRow {
+    param([System.Data.DataTable]$Table,[object]$Entry)
+    $row = $Table.NewRow()
+    $row['RelativeTime'] = $Entry.RelativeTime
+    $row['LastRun'] = $Entry.LastRun
+    $row['Application'] = $Entry.Application
+    $row['FileName'] = $Entry.FileName
+    $row['SizeKB'] = $Entry.SizeKB
+    $row['KeywordHit'] = $Entry.KeywordHit
+    [void]$Table.Rows.Add($row)
+}
+
+function Get-PrefetchRows {
+    $rows = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $script:PrefetchPath)) { return $rows }
+    $files = @(Get-ChildItem -LiteralPath $script:PrefetchPath -Filter '*.pf' -File -ErrorAction SilentlyContinue)
+    foreach ($file in $files) {
+        $app = Get-PrefetchAppName $file.Name
+        $hit = Test-KeywordHit "$app $($file.Name)"
+        $rows.Add([PSCustomObject]@{
+            SortGroup = $(if ($hit) { 0 } else { 1 })
+            Tick = $file.LastWriteTimeUtc.Ticks
+            RelativeTime = Format-RelativeTime $file.LastWriteTime
+            LastRun = $file.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+            Application = Wrap-LongText $app 52
+            FileName = Wrap-LongText $file.Name 52
+            SizeKB = [string][Math]::Round($file.Length / 1KB, 1)
+            KeywordHit = $hit
+        })
+    }
+    return @($rows | Sort-Object SortGroup, @{Expression='Tick';Descending=$true}, Application)
+}
+
+function Build-PrefetchTable {
+    $table = New-Table
+    foreach ($entry in (Get-PrefetchRows)) { Add-TableRow $table $entry }
+    return ,$table
+}
+
+$table = Build-PrefetchTable
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Prefetch Review'
+$form.StartPosition = 'CenterScreen'
+$form.Size = Get-FormSize
+$form.MinimumSize = New-Object System.Drawing.Size(940,600)
+$form.BackColor = [System.Drawing.Color]::FromArgb(18,18,18)
+$form.ForeColor = [System.Drawing.Color]::Gainsboro
+$form.Font = New-UIFont 9
+Enable-DoubleBuffer $form
+
+$topPanel = New-Object System.Windows.Forms.Panel
+$topPanel.Dock = 'Top'
+$topPanel.Height = 52
+$topPanel.BackColor = [System.Drawing.Color]::FromArgb(24,24,24)
+$topPanel.Padding = New-Object System.Windows.Forms.Padding(10,7,10,7)
+
+$titleLabel = New-Object System.Windows.Forms.Label
+$titleLabel.Text = 'PC Startup Time: ' + $(if ($script:BootTime -gt [datetime]::MinValue) { $script:BootTime.ToString('yyyy-MM-dd HH:mm:ss') + '  (' + (Format-RelativeTime $script:BootTime) + ')' } else { 'Unknown' })
+$titleLabel.Font = New-UIFont 10 -Bold
+$titleLabel.ForeColor = [System.Drawing.Color]::Gainsboro
+$titleLabel.AutoSize = $true
+$titleLabel.Location = New-Object System.Drawing.Point(12,16)
+
+$autoScrollCheck = New-Object System.Windows.Forms.CheckBox
+$autoScrollCheck.Text = 'Auto scroll'
+$autoScrollCheck.Font = New-UIFont 9
+$autoScrollCheck.ForeColor = [System.Drawing.Color]::Gainsboro
+$autoScrollCheck.BackColor = [System.Drawing.Color]::FromArgb(24,24,24)
+$autoScrollCheck.AutoSize = $true
+$autoScrollCheck.Location = New-Object System.Drawing.Point(500,15)
+
+$speedLabel = New-Object System.Windows.Forms.Label
+$speedLabel.Text = 'Speed'
+$speedLabel.Font = New-UIFont 9
+$speedLabel.ForeColor = [System.Drawing.Color]::Gainsboro
+$speedLabel.AutoSize = $true
+$speedLabel.Location = New-Object System.Drawing.Point(615,17)
+
+$speedBox = New-Object System.Windows.Forms.ComboBox
+$speedBox.DropDownStyle = 'DropDownList'
+$speedBox.Font = New-UIFont 9
+$speedBox.Width = 90
+$speedBox.Location = New-Object System.Drawing.Point(660,13)
+[void]$speedBox.Items.Add('Slow')
+[void]$speedBox.Items.Add('Normal')
+[void]$speedBox.Items.Add('Fast')
+$speedBox.SelectedIndex = 1
+
+$topPanel.Controls.Add($titleLabel)
+$topPanel.Controls.Add($autoScrollCheck)
+$topPanel.Controls.Add($speedLabel)
+$topPanel.Controls.Add($speedBox)
+
+$topPanel.Add_Resize({
+    try {
+        $x = [Math]::Max(500, $topPanel.ClientSize.Width - 320)
+        $autoScrollCheck.Location = New-Object System.Drawing.Point($x,15)
+        $speedLabel.Location = New-Object System.Drawing.Point(($x + 115),17)
+        $speedBox.Location = New-Object System.Drawing.Point(($x + 160),13)
+        $titleLabel.MaximumSize = New-Object System.Drawing.Size(([Math]::Max(250, $x - 25)), 0)
+    } catch {}
+})
+
+$grid = New-Object System.Windows.Forms.DataGridView
+$grid.Dock = 'Fill'
+$grid.ReadOnly = $true
+$grid.AllowUserToAddRows = $false
+$grid.AllowUserToDeleteRows = $false
+$grid.AllowUserToResizeColumns = $true
+$grid.AllowUserToResizeRows = $false
+$grid.RowHeadersVisible = $false
+$grid.MultiSelect = $false
+$grid.SelectionMode = 'FullRowSelect'
+$grid.BackgroundColor = [System.Drawing.Color]::FromArgb(24,24,24)
+$grid.BorderStyle = 'None'
+$grid.GridColor = [System.Drawing.Color]::FromArgb(55,55,55)
+$grid.EnableHeadersVisualStyles = $false
+$grid.ColumnHeadersBorderStyle = 'Single'
+$grid.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(34,34,34)
+$grid.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::Gainsboro
+$grid.ColumnHeadersDefaultCellStyle.Font = New-UIFont 9 -Bold
+$grid.ColumnHeadersDefaultCellStyle.WrapMode = [System.Windows.Forms.DataGridViewTriState]::True
+$grid.ColumnHeadersHeightSizeMode = 'AutoSize'
+$grid.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
+$grid.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Gainsboro
+$grid.DefaultCellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(70,70,70)
+$grid.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
+$grid.DefaultCellStyle.Font = New-UIFont 9
+$grid.DefaultCellStyle.WrapMode = [System.Windows.Forms.DataGridViewTriState]::True
+$grid.DefaultCellStyle.Padding = New-Object System.Windows.Forms.Padding(4,2,4,2)
+$grid.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(36,36,36)
+$grid.RowTemplate.Height = 24
+$grid.AutoSizeRowsMode = [System.Windows.Forms.DataGridViewAutoSizeRowsMode]::DisplayedCells
+$grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+$grid.ScrollBars = 'Both'
+Enable-DoubleBuffer $grid
+
+$grid.Add_DataBindingComplete({
+    param($sender,$e)
+    foreach ($col in $sender.Columns) {
+        $col.SortMode = 'NotSortable'
+        $col.DefaultCellStyle.WrapMode = [System.Windows.Forms.DataGridViewTriState]::True
+        switch ($col.Name) {
+            'RelativeTime' { $col.FillWeight = 15; $col.MinimumWidth = 120 }
+            'LastRun'      { $col.FillWeight = 18; $col.MinimumWidth = 150 }
+            'Application'  { $col.FillWeight = 26; $col.MinimumWidth = 180 }
+            'FileName'     { $col.FillWeight = 33; $col.MinimumWidth = 240 }
+            'SizeKB'       { $col.FillWeight = 8;  $col.MinimumWidth = 80 }
+            'KeywordHit'   { $col.FillWeight = 12; $col.MinimumWidth = 110 }
+        }
+    }
+    foreach ($row in $sender.Rows) {
+        $hit = ''
+        try { $hit = [string]$row.Cells['KeywordHit'].Value } catch {}
+        if ($hit) {
+            $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(84,36,64)
+            $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+        } else {
+            $lastRunText = ''
+            try { $lastRunText = [string]$row.Cells['LastRun'].Value } catch {}
+            $isBeforeStartup = $false
+            try {
+                if ($script:BootTime -gt [datetime]::MinValue -and ([datetime]::Parse($lastRunText) -lt $script:BootTime)) { $isBeforeStartup = $true }
+            } catch {}
+            if ($isBeforeStartup) {
+                $row.Cells['RelativeTime'].Style.BackColor = [System.Drawing.Color]::FromArgb(115,95,20)
+                $row.Cells['RelativeTime'].Style.ForeColor = [System.Drawing.Color]::White
+            } else {
+                $row.Cells['RelativeTime'].Style.BackColor = [System.Drawing.Color]::FromArgb(92,58,24)
+                $row.Cells['RelativeTime'].Style.ForeColor = [System.Drawing.Color]::White
+            }
+        }
+    }
+})
+
+$scrollTimer = New-Object System.Windows.Forms.Timer
+$scrollTimer.Interval = 120
+$scrollTimer.Add_Tick({
+    if (-not $autoScrollCheck.Checked) { return }
+    if ($grid.RowCount -le 0) { return }
+    try {
+        $visibleCount = $grid.DisplayedRowCount($false)
+        if ($visibleCount -lt 1) { $visibleCount = 1 }
+        $maxFirst = [Math]::Max(0, $grid.RowCount - $visibleCount)
+        $step = 1
+        if ($speedBox.SelectedItem -eq 'Fast') { $step = 3 }
+        elseif ($speedBox.SelectedItem -eq 'Slow') { $step = 1 }
+        else { $step = 2 }
+        $next = $grid.FirstDisplayedScrollingRowIndex + $step
+        if ($next -gt $maxFirst) {
+            $autoScrollCheck.Checked = $false
+            return
+        }
+        $grid.FirstDisplayedScrollingRowIndex = $next
+    } catch {}
+})
+
+$autoScrollCheck.Add_CheckedChanged({
+    if ($autoScrollCheck.Checked) { $scrollTimer.Start() } else { $scrollTimer.Stop() }
+})
+
+$speedBox.Add_SelectedIndexChanged({
+    if ($speedBox.SelectedItem -eq 'Fast') { $scrollTimer.Interval = 75 }
+    elseif ($speedBox.SelectedItem -eq 'Slow') { $scrollTimer.Interval = 180 }
+    else { $scrollTimer.Interval = 120 }
+})
+
+$form.Add_FormClosing({
+    try { $scrollTimer.Stop() } catch {}
+})
+
+$form.Controls.Add($grid)
+$form.Controls.Add($topPanel)
+$grid.DataSource = $table
+
+[void]$form.ShowDialog()
