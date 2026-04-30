@@ -1486,395 +1486,6 @@ function Invoke-USBDeviewSection {
 }
 
 # ===============================
-
-# ===============================
-# ARTIFACT REVIEW UI - EMBEDDED MONITOR WINDOW
-# ===============================
-
-function Get-EmbeddedArtifactReviewUiScript {
-@'
-param(
-    [Parameter(Mandatory=$true)]
-    [string]$ReviewDir
-)
-
-$ErrorActionPreference = 'SilentlyContinue'
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-try { [System.Windows.Forms.Application]::EnableVisualStyles() } catch {}
-
-$quickPath = Join-Path $ReviewDir 'QuickReview.txt'
-$historyPath = Join-Path $ReviewDir 'PowerShellHistory.txt'
-$monitorPath = Join-Path $ReviewDir 'Monitoring.txt'
-
-$form = New-Object System.Windows.Forms.Form
-$form.Text = 'Artifact Review - Quick Review / PowerShell History / Monitoring'
-$form.WindowState = 'Maximized'
-$form.StartPosition = 'CenterScreen'
-$form.MinimumSize = New-Object System.Drawing.Size(1000,650)
-$form.BackColor = [System.Drawing.Color]::FromArgb(18,18,18)
-$form.ForeColor = [System.Drawing.Color]::White
-
-$topPanel = New-Object System.Windows.Forms.Panel
-$topPanel.Dock = 'Top'
-$topPanel.Height = 78
-$topPanel.BackColor = [System.Drawing.Color]::FromArgb(24,24,24)
-$form.Controls.Add($topPanel)
-
-$title = New-Object System.Windows.Forms.Label
-$title.Text = 'Artifact Review'
-$title.Font = New-Object System.Drawing.Font('Segoe UI',18,[System.Drawing.FontStyle]::Bold)
-$title.ForeColor = [System.Drawing.Color]::White
-$title.AutoSize = $true
-$title.Location = New-Object System.Drawing.Point(16,10)
-$topPanel.Controls.Add($title)
-
-$subtitle = New-Object System.Windows.Forms.Label
-$subtitle.Text = 'Review Quick Review, then PowerShell History. Leave this window open until the match ends. After reveal, open Monitoring and scroll through it.'
-$subtitle.Font = New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Regular)
-$subtitle.ForeColor = [System.Drawing.Color]::Gainsboro
-$subtitle.AutoSize = $true
-$subtitle.Location = New-Object System.Drawing.Point(18,46)
-$topPanel.Controls.Add($subtitle)
-
-$buttonPanel = New-Object System.Windows.Forms.Panel
-$buttonPanel.Dock = 'Bottom'
-$buttonPanel.Height = 48
-$buttonPanel.BackColor = [System.Drawing.Color]::FromArgb(24,24,24)
-$form.Controls.Add($buttonPanel)
-
-$status = New-Object System.Windows.Forms.Label
-$status.Text = 'Auto-refresh is on.'
-$status.Font = New-Object System.Drawing.Font('Segoe UI',9,[System.Drawing.FontStyle]::Regular)
-$status.ForeColor = [System.Drawing.Color]::LightGray
-$status.AutoSize = $true
-$status.Location = New-Object System.Drawing.Point(16,15)
-$buttonPanel.Controls.Add($status)
-
-$tab = New-Object System.Windows.Forms.TabControl
-$tab.Dock = 'Fill'
-$tab.Font = New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Regular)
-$form.Controls.Add($tab)
-$form.Controls.SetChildIndex($tab,1)
-
-$script:Pages = @()
-
-function New-ReviewPage {
-    param(
-        [string]$Name,
-        [string]$FilePath
-    )
-
-    $page = New-Object System.Windows.Forms.TabPage
-    $page.Text = $Name
-    $page.BackColor = [System.Drawing.Color]::FromArgb(18,18,18)
-    $page.ForeColor = [System.Drawing.Color]::White
-
-    $box = New-Object System.Windows.Forms.RichTextBox
-    $box.Dock = 'Fill'
-    $box.ReadOnly = $true
-    $box.WordWrap = $false
-    $box.ScrollBars = 'Both'
-    $box.BorderStyle = 'None'
-    $box.BackColor = [System.Drawing.Color]::FromArgb(10,10,10)
-    $box.ForeColor = [System.Drawing.Color]::WhiteSmoke
-    $box.Font = New-Object System.Drawing.Font('Consolas',10,[System.Drawing.FontStyle]::Regular)
-    $box.DetectUrls = $false
-    $page.Controls.Add($box)
-    [void]$tab.TabPages.Add($page)
-
-    $script:Pages += [pscustomobject]@{
-        Name = $Name
-        FilePath = $FilePath
-        Box = $box
-        LastWrite = [datetime]::MinValue
-    }
-}
-
-function Set-ReviewText {
-    param($PageInfo)
-
-    $path = $PageInfo.FilePath
-    $text = "Waiting for $($PageInfo.Name)..."
-    $lastWrite = [datetime]::MinValue
-
-    if (Test-Path $path) {
-        try {
-            $lastWrite = (Get-Item $path).LastWriteTime
-            if ($lastWrite -eq $PageInfo.LastWrite -and $PageInfo.Box.TextLength -gt 0) { return }
-            $text = [System.IO.File]::ReadAllText($path)
-            if ([string]::IsNullOrWhiteSpace($text)) { $text = "No information found for $($PageInfo.Name)." }
-        } catch {
-            $text = "Could not read $path"
-        }
-    }
-
-    $oldStart = $PageInfo.Box.SelectionStart
-    $oldLength = $PageInfo.Box.SelectionLength
-    $PageInfo.Box.Text = $text
-    $PageInfo.LastWrite = $lastWrite
-
-    try {
-        $PageInfo.Box.SelectionStart = [Math]::Min($oldStart, $PageInfo.Box.TextLength)
-        $PageInfo.Box.SelectionLength = [Math]::Min($oldLength, [Math]::Max(0, $PageInfo.Box.TextLength - $PageInfo.Box.SelectionStart))
-        $PageInfo.Box.ScrollToCaret()
-    } catch {}
-}
-
-function Refresh-AllPages {
-    foreach ($p in $script:Pages) { Set-ReviewText -PageInfo $p }
-    $status.Text = 'Last refresh: ' + (Get-Date).ToString('HH:mm:ss')
-}
-
-New-ReviewPage -Name 'Quick Review' -FilePath $quickPath
-New-ReviewPage -Name 'PowerShell History' -FilePath $historyPath
-New-ReviewPage -Name 'Monitoring' -FilePath $monitorPath
-
-$refreshButton = New-Object System.Windows.Forms.Button
-$refreshButton.Text = 'Refresh'
-$refreshButton.Width = 100
-$refreshButton.Height = 30
-$refreshButton.Location = New-Object System.Drawing.Point(210,9)
-$refreshButton.BackColor = [System.Drawing.Color]::FromArgb(45,45,45)
-$refreshButton.ForeColor = [System.Drawing.Color]::White
-$refreshButton.FlatStyle = 'Flat'
-$refreshButton.Add_Click({ Refresh-AllPages })
-$buttonPanel.Controls.Add($refreshButton)
-
-$topButton = New-Object System.Windows.Forms.Button
-$topButton.Text = 'Top'
-$topButton.Width = 80
-$topButton.Height = 30
-$topButton.Location = New-Object System.Drawing.Point(320,9)
-$topButton.BackColor = [System.Drawing.Color]::FromArgb(45,45,45)
-$topButton.ForeColor = [System.Drawing.Color]::White
-$topButton.FlatStyle = 'Flat'
-$topButton.Add_Click({
-    try {
-        $box = $tab.SelectedTab.Controls[0]
-        $box.SelectionStart = 0
-        $box.ScrollToCaret()
-    } catch {}
-})
-$buttonPanel.Controls.Add($topButton)
-
-$bottomButton = New-Object System.Windows.Forms.Button
-$bottomButton.Text = 'Bottom'
-$bottomButton.Width = 90
-$bottomButton.Height = 30
-$bottomButton.Location = New-Object System.Drawing.Point(410,9)
-$bottomButton.BackColor = [System.Drawing.Color]::FromArgb(45,45,45)
-$bottomButton.ForeColor = [System.Drawing.Color]::White
-$bottomButton.FlatStyle = 'Flat'
-$bottomButton.Add_Click({
-    try {
-        $box = $tab.SelectedTab.Controls[0]
-        $box.SelectionStart = $box.TextLength
-        $box.ScrollToCaret()
-    } catch {}
-})
-$buttonPanel.Controls.Add($bottomButton)
-
-$closeButton = New-Object System.Windows.Forms.Button
-$closeButton.Text = 'Close'
-$closeButton.Width = 90
-$closeButton.Height = 30
-$closeButton.Location = New-Object System.Drawing.Point(510,9)
-$closeButton.BackColor = [System.Drawing.Color]::FromArgb(65,35,35)
-$closeButton.ForeColor = [System.Drawing.Color]::White
-$closeButton.FlatStyle = 'Flat'
-$closeButton.Add_Click({ $form.Close() })
-$buttonPanel.Controls.Add($closeButton)
-
-$timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 2000
-$timer.Add_Tick({ Refresh-AllPages })
-$timer.Start()
-
-$form.Add_Shown({
-    Refresh-AllPages
-    $form.Activate()
-})
-
-[System.Windows.Forms.Application]::Run($form)
-'@
-}
-
-function Initialize-ArtifactReviewUiFiles {
-    $script:ArtifactReviewDir = Join-Path $env:TEMP ("ArtifactReview_" + [guid]::NewGuid().ToString('N'))
-    $script:ArtifactQuickReviewPath = Join-Path $script:ArtifactReviewDir 'QuickReview.txt'
-    $script:ArtifactPowerShellHistoryPath = Join-Path $script:ArtifactReviewDir 'PowerShellHistory.txt'
-    $script:ArtifactMonitoringPath = Join-Path $script:ArtifactReviewDir 'Monitoring.txt'
-    $script:ArtifactReviewUiScriptPath = Join-Path $script:ArtifactReviewDir 'ArtifactReviewUi.ps1'
-
-    New-Item -Path $script:ArtifactReviewDir -ItemType Directory -Force | Out-Null
-
-    $quick = New-Object System.Collections.Generic.List[string]
-    $quick.Add('=====================================')
-    $quick.Add(' QUICK REVIEW')
-    $quick.Add('=====================================')
-    $quick.Add('Generated: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
-    $quick.Add('Computer: ' + $env:COMPUTERNAME)
-    $quick.Add('User: ' + $env:USERNAME)
-    $quick.Add('')
-    $quick.Add('Scroll this section first. Then go to PowerShell History. Leave this window open until the match ends.')
-    $quick.Add('')
-    $quick.Add('----- LIVE MONITOR STATUS -----')
-    if (Test-Path $monitorHeartbeatPath) { $quick.Add('Live monitor heartbeat file: Created') }
-    else { $quick.Add('Live monitor heartbeat file: Waiting') }
-    $quick.Add('')
-
-    $quick.Add('----- USB DRIVES -----')
-    if ($initialUSB -and $initialUSB.Count -gt 0) {
-        foreach ($usb in $initialUSB) { $quick.Add('USB connected at start: ' + $usb) }
-    } else {
-        $quick.Add('USB drives: None connected at start')
-    }
-    $quick.Add('')
-
-    $quick.Add('----- DEFENDER SETTINGS -----')
-    if ($initialRTP -eq $true) { $quick.Add('Real-time protection: ENABLED') }
-    elseif ($initialRTP -eq $false) { $quick.Add('Real-time protection: DISABLED') }
-    else { $quick.Add('Real-time protection: Unknown') }
-
-    if ($initialExclusions -and $initialExclusions.Count -gt 0) {
-        $quick.Add('Defender exclusions active:')
-        foreach ($ex in $initialExclusions) { $quick.Add('  - ' + $ex) }
-    } else {
-        $quick.Add('Defender exclusions: None')
-    }
-    $quick.Add('')
-
-    $quick.Add('----- DEFENDER REGISTRY PATHS -----')
-    $regCount = 0
-    foreach ($base in $registryBasePaths) {
-        if ($initialRegistry.ContainsKey($base)) {
-            foreach ($key in $initialRegistry[$base].Keys) {
-                $regCount++
-                $quick.Add('Registry value: ' + $key + ' = ' + $initialRegistry[$base][$key])
-            }
-        }
-    }
-    if ($regCount -eq 0) { $quick.Add('Defender registry paths: Clean') }
-    $quick.Add('')
-
-    $quick.Add('----- MONITORED FOLDERS AT START -----')
-    $folderCount = 0
-    foreach ($folderInfo in $initialFolders.Values) {
-        if ($folderInfo.Path) {
-            $folderCount++
-            $quick.Add('Folder found: ' + $folderInfo.Path)
-            foreach ($item in $folderInfo.Contents) { $quick.Add('  Content: ' + $item) }
-        }
-    }
-    if ($folderCount -eq 0) { $quick.Add('Monitored folders: None found') }
-    $quick.Add('')
-
-    $quick.Add('----- DEFENDER THREAT HISTORY AT START -----')
-    if ($initialThreats -and $initialThreats.Count -gt 0) {
-        foreach ($t in $initialThreats) {
-            $quick.Add(('Threat: {0} | Status: {1} | Time: {2}' -f $t.ThreatName,$t.ThreatStatus,$t.DetectionTime))
-        }
-    } else {
-        $quick.Add('Defender threat history: None')
-    }
-    $quick.Add('')
-
-    $quick.Add('----- STARTUP DETECTIONS / NOTES -----')
-    if ($eventList -and $eventList.Count -gt 0) {
-        foreach ($evt in $eventList) { $quick.Add($evt) }
-    } else {
-        $quick.Add('No startup detections.')
-    }
-
-    Set-Content -Path $script:ArtifactQuickReviewPath -Value $quick -Encoding UTF8
-
-    $historyOut = New-Object System.Collections.Generic.List[string]
-    $historyOut.Add('=====================================')
-    $historyOut.Add(' POWERSHELL HISTORY')
-    $historyOut.Add('=====================================')
-    $historyOut.Add('Scroll this section after Quick Review.')
-    $historyOut.Add('')
-
-    if ($psHistoryPath -and (Test-Path $psHistoryPath)) {
-        $historyOut.Add('History path: ' + $psHistoryPath)
-        $historyOut.Add('')
-        $histLines = @(Get-Content -Path $psHistoryPath -ErrorAction SilentlyContinue)
-        if ($histLines.Count -eq 0) {
-            $historyOut.Add('PowerShell history file exists, but it is empty.')
-        } else {
-            for ($i = 0; $i -lt $histLines.Count; $i++) {
-                $historyOut.Add(('{0,6}: {1}' -f ($i + 1), $histLines[$i]))
-            }
-        }
-    } else {
-        $historyOut.Add('PowerShell history file was not found.')
-    }
-
-    Set-Content -Path $script:ArtifactPowerShellHistoryPath -Value $historyOut -Encoding UTF8
-
-    $monitorStart = @(
-        '=====================================',
-        ' MONITORING',
-        '=====================================',
-        'Live monitoring is still running.',
-        '',
-        'Leave this window open until the match ends.',
-        'After pressing Enter in the main PowerShell window, this tab will update with detections.',
-        '',
-        'Current time: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    )
-    Set-Content -Path $script:ArtifactMonitoringPath -Value $monitorStart -Encoding UTF8
-
-    Get-EmbeddedArtifactReviewUiScript | Set-Content -Path $script:ArtifactReviewUiScriptPath -Encoding UTF8
-}
-
-function Start-ArtifactReviewUiWindow {
-    if (-not $script:ArtifactReviewDir -or -not (Test-Path $script:ArtifactReviewUiScriptPath)) { return $null }
-
-    try {
-        $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        if (-not (Test-Path $psExe)) { $psExe = 'powershell.exe' }
-
-        $arg = '-NoProfile -ExecutionPolicy Bypass -STA -File "{0}" -ReviewDir "{1}"' -f $script:ArtifactReviewUiScriptPath, $script:ArtifactReviewDir
-        return Start-Process -FilePath $psExe -ArgumentList $arg -WindowStyle Maximized -PassThru
-    } catch {
-        return $null
-    }
-}
-
-function Update-ArtifactMonitoringFile {
-    param(
-        [object[]]$Detections,
-        [string]$MonitorState,
-        [string]$MonitorMessage
-    )
-
-    if (-not $script:ArtifactMonitoringPath) { return }
-
-    $out = New-Object System.Collections.Generic.List[string]
-    $out.Add('=====================================')
-    $out.Add(' MONITORING RESULTS')
-    $out.Add('=====================================')
-    $out.Add('Updated: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
-    $out.Add('')
-    $out.Add('Scroll this full Monitoring section now.')
-    $out.Add('')
-    $out.Add('----- MONITOR INTEGRITY -----')
-    $out.Add('State: ' + $MonitorState)
-    $out.Add($MonitorMessage)
-    $out.Add('')
-    $out.Add('----- DETECTION LOGS -----')
-
-    if (-not $Detections -or $Detections.Count -eq 0) {
-        $out.Add('No detections.')
-    } else {
-        foreach ($evt in $Detections) { $out.Add([string]$evt) }
-    }
-
-    Set-Content -Path $script:ArtifactMonitoringPath -Value $out -Encoding UTF8
-}
-
 # SETUP
 # ===============================
 
@@ -2460,11 +2071,11 @@ $monitorJob = Start-Job -Name 'LiveMonitor' -ScriptBlock {
 # HEADER
 # ===============================
 
-Clear-Host
-Write-Host "   __   ____  _____  ___  _____________  ___  ___  _____  _______  ___  ____  __   ___________  __  _________" -ForegroundColor Cyan
-Write-Host "  / /  / __ \/ ___/ / _ \/ __/ ___/ __ \/ _ \/ _ \/  _/ |/ / ___/ / _ \/ __ \/ /  /  _/ ___/\ \/ / /_  __<  /" -ForegroundColor Cyan
-Write-Host " / /__/ /_/ / /__  / , _/ _// /__/ /_/ / , _/ // // //    / (_ / / ___/ /_/ / /___/ // /__   \  /   / /  / / " -ForegroundColor Cyan
-Write-Host "/____/\____/\___/ /_/|_/___/\___/\____/_/|_/____/___/_/|_/\___/ /_/   \____/____/___/\___/   /_/   /_/  /_/  " -ForegroundColor Cyan
+Write-Host "    __   ____  _____  ___  _____________  ___  ___  _____  _______  ___  ____  __   ___________  __  _________ " -ForegroundColor Cyan
+Write-Host "   / /  / __ \/ ___/ / _ \/ __/ ___/ __ \/ _ \/ _ \/  _/ |/ / ___/ / _ \/ __ \/ /  /  _/ ___/\ \/ / /_  __/_  |" -ForegroundColor Cyan
+Write-Host "  / /__/ /_/ / /__  / , _/ _// /__/ /_/ / , _/ // // //    / (_ / / ___/ /_/ / /___/ // /__   \  /   / / / __/ " -ForegroundColor Cyan
+Write-Host " /____/\____/\___/ /_/|_/___/\___/\____/_/|_/____/___/_/|_/\___/ /_/   \____/____/___/\___/   /_/   /_/ /____/ " -ForegroundColor Cyan
+Write-Host "                                                                                                               " -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Discord.gg/locx | Complete with 100% success rate" -ForegroundColor White
 Write-Host ""
@@ -2806,107 +2417,63 @@ Invoke-LastActivityViewerSection
 # ===============================
 # STEP 7 - MONITORING
 # ===============================
-
 Clear-Host
 Write-Host "[ Step 7 of 7 - Monitoring ]" -ForegroundColor Cyan
 Show-LoadingBar "Step 7"
 
-$artifactUiProcess = $null
-$artifactUiStarted = $false
+$resourceMonitorProc = $null
 
 try {
-    Initialize-ArtifactReviewUiFiles
-    $artifactUiProcess = Start-ArtifactReviewUiWindow
-    if ($artifactUiProcess) { $artifactUiStarted = $true }
-} catch {}
-
-$resourceMonitorPath = Join-Path $env:SystemRoot 'System32\resmon.exe'
-$resourceMonitorLaunched = $false
-
-try {
-    if (Test-Path $resourceMonitorPath) {
-        $resourceProcess = Start-MaximizedProcess -FilePath $resourceMonitorPath
-    } else {
-        $resourceProcess = Start-MaximizedProcess -FilePath 'resmon.exe'
-    }
-
-    $resourceMonitorLaunched = $true
+    $resourceMonitorProc = Start-Process -FilePath "$env:SystemRoot\System32\resmon.exe" -PassThru
 } catch {
     try {
-        $perfmonPath = Join-Path $env:SystemRoot 'System32\perfmon.exe'
-        if (Test-Path $perfmonPath) {
-            $resourceProcess = Start-MaximizedProcess -FilePath $perfmonPath -ArgumentList @('/res')
-        } else {
-            $resourceProcess = Start-MaximizedProcess -FilePath 'perfmon.exe' -ArgumentList @('/res')
-        }
-
-        $resourceMonitorLaunched = $true
+        $resourceMonitorProc = Start-Process -FilePath "resmon.exe" -PassThru
     } catch {}
 }
-
-if ($resourceMonitorLaunched) { Maximize-ResourceMonitorWindow }
 
 Write-Host "Live Monitoring Active" -ForegroundColor Green
 Write-Host ""
 Write-Host "Keep this PowerShell window open while monitoring is active." -ForegroundColor Yellow
 Write-Host "If you need to rejoin, do not continue or close this PowerShell window. Simply run the rejoin PowerShell." -ForegroundColor Yellow
 Write-Host ""
-
-if ($resourceMonitorLaunched) {
-    Write-Host "Resource Monitor is open. Keep it open. You may minimize it." -ForegroundColor Green
-} else {
-    Write-Host "Resource Monitor could not be opened automatically. Open it manually with resmon.exe and keep it open. You may minimize it." -ForegroundColor Red
-}
-
-if ($artifactUiStarted) {
-    Write-Host "Artifact Review window is open. Keep it open until the match ends." -ForegroundColor Green
-} else {
-    Write-Host "Artifact Review window could not be opened automatically. The review files are still saved in temp." -ForegroundColor Red
-}
-
+Write-Host "Resource Monitor opened." -ForegroundColor Green
 Write-Host ""
-Write-Host "Resource Monitor instructions:" -ForegroundColor Cyan
 Write-Host "1. Go to Overview." -ForegroundColor White
 Write-Host "2. Go to the CPU section." -ForegroundColor White
 Write-Host "3. Scroll down and up, making sure everything is clear and easy to see." -ForegroundColor White
 Write-Host "4. Keep Resource Monitor open. You may minimize it." -ForegroundColor White
-Write-Host ""
-Write-Host "Artifact Review instructions:" -ForegroundColor Cyan
-Write-Host "1. Go to Quick Review and scroll through it." -ForegroundColor White
-Write-Host "2. Go to PowerShell History and scroll through it." -ForegroundColor White
-Write-Host "3. Leave Artifact Review open until the match ends." -ForegroundColor White
-Write-Host "4. After detections reveal, go to Monitoring and scroll through it." -ForegroundColor White
 Write-Host ""
 Write-Host "When you finish your match, press Enter to reveal all detections." -ForegroundColor Yellow
 Write-Host "Press Enter to continue..." -ForegroundColor Yellow
 Wait-ForEnter
 
 Write-Host ""
-Write-Host "Before showing detections, check Resource Monitor and Artifact Review one more time:" -ForegroundColor Cyan
-Write-Host "1. Resource Monitor: Overview > CPU section. Scroll down and up." -ForegroundColor White
-Write-Host "2. Artifact Review: Quick Review and PowerShell History should already be reviewed." -ForegroundColor White
-Write-Host "3. Keep both windows open until detections are revealed." -ForegroundColor White
+Write-Host "Before showing detections, check Resource Monitor one more time:" -ForegroundColor Yellow
+Write-Host "1. Go to Overview." -ForegroundColor White
+Write-Host "2. Go to the CPU section." -ForegroundColor White
+Write-Host "3. Scroll down and up, making sure everything is clear and easy to see." -ForegroundColor White
+Write-Host "4. Keep Resource Monitor open. You may minimize it." -ForegroundColor White
 Write-Host ""
 
-try {
-    while ([Console]::KeyAvailable) {
-        [Console]::ReadKey($true) | Out-Null
-        Start-Sleep -Milliseconds 25
-    }
-} catch {}
-
 for ($i = 3; $i -ge 1; $i--) {
-    Write-Host "`rDetection reveal unlocks in $i second(s)...   " -ForegroundColor Cyan -NoNewline
-    try { [Console]::Out.Flush() } catch {}
+    Write-Host "Detection reveal unlocks in $i second(s)..." -ForegroundColor Cyan
     Start-Sleep -Seconds 1
 }
 
-Write-Host "`rPress Enter when the final Resource Monitor and Artifact Review check is done...             " -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Press Enter when Resource Monitor review is done..." -ForegroundColor Cyan
 Wait-ForEnter
-Close-ResourceMonitorWindow
 
-$monitorIntegrityState = 'Unknown'
-$monitorIntegrityMessage = 'Monitor integrity could not be verified.'
+try {
+    if ($resourceMonitorProc -and -not $resourceMonitorProc.HasExited) {
+        Stop-Process -Id $resourceMonitorProc.Id -Force -ErrorAction SilentlyContinue
+    } else {
+        Get-Process -Name "resmon" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+} catch {}
+
+$monitorIntegrityState = "Unknown"
+$monitorIntegrityMessage = "Monitor integrity could not be verified."
 
 $jobRef = Get-Job -Name 'LiveMonitor' -ErrorAction SilentlyContinue
 $heartbeatFresh = $false
@@ -2916,24 +2483,26 @@ if ($jobRef) {
         if (Test-Path $monitorHeartbeatPath) {
             try {
                 $heartbeatAge = ((Get-Date) - (Get-Item $monitorHeartbeatPath).LastWriteTime).TotalSeconds
-                if ($heartbeatAge -le 5) { $heartbeatFresh = $true }
+                if ($heartbeatAge -le 5) {
+                    $heartbeatFresh = $true
+                }
             } catch {}
         }
 
         if ($heartbeatFresh) {
-            $monitorIntegrityState = 'OK'
-            $monitorIntegrityMessage = 'Monitor integrity: OK - live monitor heartbeat confirmed.'
+            $monitorIntegrityState = "OK"
+            $monitorIntegrityMessage = "Monitor integrity: OK - live monitor heartbeat confirmed."
         } else {
-            $monitorIntegrityState = 'Warning'
-            $monitorIntegrityMessage = 'Monitor integrity warning: live monitor heartbeat was stale or missing.'
+            $monitorIntegrityState = "Warning"
+            $monitorIntegrityMessage = "Monitor integrity warning: live monitor heartbeat was stale or missing."
         }
     } else {
-        $monitorIntegrityState = 'Warning'
+        $monitorIntegrityState = "Warning"
         $monitorIntegrityMessage = "Monitor integrity warning: live monitor job was not running (State: $($jobRef.State))."
     }
 } else {
-    $monitorIntegrityState = 'Warning'
-    $monitorIntegrityMessage = 'Monitor integrity warning: live monitor job was missing.'
+    $monitorIntegrityState = "Warning"
+    $monitorIntegrityMessage = "Monitor integrity warning: live monitor job was missing."
 }
 
 Add-Event -List $eventList -Message $monitorIntegrityMessage
@@ -2946,78 +2515,101 @@ if (Test-Path $monitorHeartbeatPath) {
     Remove-Item $monitorHeartbeatPath -Force -ErrorAction SilentlyContinue
 }
 
-# RESULTS
-# ===============================
-
 Clear-Host
-Write-Host "[ Monitoring - Results ]" -ForegroundColor Cyan
-Show-LoadingBar "Loading Results"
+Write-Host "[ Step 7 of 7 - Monitoring - Results ]" -ForegroundColor Cyan
+Show-LoadingBar "Step 7"
 
 Write-Host ""
 Write-Host "=== Initial System Overview ===" -ForegroundColor Cyan
 
-if ($monitorIntegrityState -eq 'OK') { Write-Host 'Live monitor integrity: ACTIVE' -ForegroundColor Green }
-else { Write-Host 'Live monitor integrity: WARNING' -ForegroundColor Red }
-
-if ($initialUSB.Count -eq 0) { Write-Host 'USB drives: None connected' -ForegroundColor Green }
-else { Write-Host "USB drives connected: $($initialUSB -join ', ')" -ForegroundColor Yellow }
-
-if ($initialExclusions.Count -eq 0) {
-    Write-Host 'Defender exclusions: None' -ForegroundColor Green
+if ($monitorIntegrityState -eq 'OK') {
+    Write-Host "Live monitor integrity: ACTIVE" -ForegroundColor Green
 } else {
-    Write-Host 'Defender exclusions active:' -ForegroundColor Red
-    foreach ($ex in $initialExclusions) { Write-Host "  - $ex" -ForegroundColor Red }
+    Write-Host "Live monitor integrity: WARNING" -ForegroundColor Red
 }
 
-if ($initialRTP -eq $true) { Write-Host 'Real-time protection: ENABLED' -ForegroundColor Green }
-elseif ($initialRTP -eq $false) { Write-Host 'Real-time protection: DISABLED' -ForegroundColor Red }
-else { Write-Host 'Real-time protection: Unknown' -ForegroundColor Yellow }
+if ($initialUSB.Count -eq 0) {
+    Write-Host "USB drives: None connected" -ForegroundColor Green
+} else {
+    Write-Host "USB drives connected: $($initialUSB -join ', ')" -ForegroundColor Yellow
+}
+
+if ($initialExclusions.Count -eq 0) {
+    Write-Host "Defender exclusions: None" -ForegroundColor Green
+} else {
+    Write-Host "Defender exclusions active:" -ForegroundColor Red
+    foreach ($ex in $initialExclusions) {
+        Write-Host "  - $ex" -ForegroundColor Red
+    }
+}
+
+if ($initialRTP -eq $true) {
+    Write-Host "Real-time protection: ENABLED" -ForegroundColor Green
+}
+elseif ($initialRTP -eq $false) {
+    Write-Host "Real-time protection: DISABLED" -ForegroundColor Red
+}
+else {
+    Write-Host "Real-time protection: Unknown" -ForegroundColor Yellow
+}
 
 $registryIssues = $false
 foreach ($base in $registryBasePaths) {
-    if ($initialRegistry[$base].Count -gt 0) { $registryIssues = $true }
+    if ($initialRegistry[$base].Count -gt 0) {
+        $registryIssues = $true
+    }
 }
 
 if (-not $registryIssues) {
-    Write-Host 'Defender registry paths: Clean' -ForegroundColor Green
+    Write-Host "Defender registry paths: Clean" -ForegroundColor Green
 } else {
-    Write-Host 'Defender registry paths: Issues found' -ForegroundColor Red
+    Write-Host "Defender registry paths: Issues found" -ForegroundColor Red
     foreach ($base in $registryBasePaths) {
-        foreach ($key in $initialRegistry[$base].Keys) { Write-Host "  - $key : $($initialRegistry[$base][$key])" -ForegroundColor Red }
+        foreach ($key in $initialRegistry[$base].Keys) {
+            Write-Host "  - $key : $($initialRegistry[$base][$key])" -ForegroundColor Red
+        }
     }
 }
 
 $folderIssues = $false
 foreach ($folderInfo in $initialFolders.Values) {
-    if ($folderInfo.Path) { $folderIssues = $true }
+    if ($folderInfo.Path) {
+        $folderIssues = $true
+    }
 }
 
 if (-not $folderIssues) {
-    Write-Host 'Monitored folders: None found (clean)' -ForegroundColor Green
+    Write-Host "Monitored folders: None found (clean)" -ForegroundColor Green
 } else {
-    Write-Host 'Monitored folders: Found' -ForegroundColor Red
+    Write-Host "Monitored folders: Found" -ForegroundColor Red
     foreach ($folderInfo in $initialFolders.Values) {
         if ($folderInfo.Path) {
             Write-Host "  - $($folderInfo.Path)" -ForegroundColor Red
-            foreach ($item in $folderInfo.Contents) { Write-Host "      Content: $item" -ForegroundColor Yellow }
+            foreach ($item in $folderInfo.Contents) {
+                Write-Host "      Content: $item" -ForegroundColor Yellow
+            }
         }
     }
 }
 
 if (-not $initialThreats -or $initialThreats.Count -eq 0) {
-    Write-Host 'Defender threat history: None' -ForegroundColor Green
+    Write-Host "Defender threat history: None" -ForegroundColor Green
 } else {
-    Write-Host 'Defender threat history:' -ForegroundColor Red
+    Write-Host "Defender threat history:" -ForegroundColor Red
     foreach ($t in $initialThreats) {
         $status = switch ($t.ThreatStatus) {
-            1 { 'Allowed' }
-            2 { 'Quarantined' }
-            3 { 'Removed' }
-            default { 'Detected' }
+            1 { "Allowed" }
+            2 { "Quarantined" }
+            3 { "Removed" }
+            default { "Detected" }
         }
+
         $line = "  - $($t.ThreatName) | $status | $($t.DetectionTime)"
-        if ($line -match '(?i)roblox') { Write-Host $line -ForegroundColor Yellow }
-        else { Write-Host $line -ForegroundColor Red }
+        if ($line -match '(?i)roblox') {
+            Write-Host $line -ForegroundColor Yellow
+        } else {
+            Write-Host $line -ForegroundColor Red
+        }
     }
 }
 
@@ -3039,42 +2631,49 @@ foreach ($line in $liveEvents) {
         } else {
             $psCounter++
         }
-    }
-    else {
+    } else {
         if ($pendingPS) {
             $groupedLive += "[$firstTimestamp] PowerShell execution detected ($psCounter executions)"
             $pendingPS = $false
             $psCounter = 0
             $firstTimestamp = $null
         }
+
         $groupedLive += $line
     }
 }
 
-if ($pendingPS) { $groupedLive += "[$firstTimestamp] PowerShell execution detected ($psCounter executions)" }
+if ($pendingPS) {
+    $groupedLive += "[$firstTimestamp] PowerShell execution detected ($psCounter executions)"
+}
 
 $allDetections = $eventList + $groupedLive
 
-Update-ArtifactMonitoringFile -Detections $allDetections -MonitorState $monitorIntegrityState -MonitorMessage $monitorIntegrityMessage
-
 if ($allDetections.Count -eq 0) {
-    Write-Host 'No detections.' -ForegroundColor Green
+    Write-Host "No detections." -ForegroundColor Green
 } else {
     foreach ($evt in $allDetections) {
-        if ($evt -match '(?i)roblox') { Write-Host $evt -ForegroundColor Yellow }
-        elseif ($evt -match 'USB inserted|USB removed') { Write-Host $evt -ForegroundColor Yellow }
-        elseif ($evt -match 'Exclusion added|Exclusion removed|Real-time protection changed|Registry key|Folder CREATED|Folder DELETED|New item created|Defender threat|Defender action|Defender malware|Defender severe|Defender event|PowerShell history file was CLEARED|PowerShell history file was TRUNCATED|DNS match found|Process started|Suspicious EXE started|Running EXE detected in monitored path|Monitor integrity warning') { Write-Host $evt -ForegroundColor Red }
-        elseif ($evt -match 'PowerShell (command|script|execution)') { Write-Host $evt -ForegroundColor Magenta }
-        elseif ($evt -match 'Monitor integrity: OK') { Write-Host $evt -ForegroundColor Green }
-        else { Write-Host $evt -ForegroundColor White }
+        if ($evt -match '(?i)roblox') {
+            Write-Host $evt -ForegroundColor Yellow
+        }
+        elseif ($evt -match "USB inserted|USB removed") {
+            Write-Host $evt -ForegroundColor Yellow
+        }
+        elseif ($evt -match "Exclusion added|Exclusion removed|Real-time protection changed|Registry key|Folder CREATED|Folder DELETED|New item created|Defender threat|Defender action|Defender malware|Defender severe|Defender event|PowerShell history file was CLEARED|PowerShell history file was TRUNCATED|DNS match found|Process started|Suspicious EXE started|Running EXE detected in monitored path|Monitor integrity warning") {
+            Write-Host $evt -ForegroundColor Red
+        }
+        elseif ($evt -match "PowerShell (command|script|execution)") {
+            Write-Host $evt -ForegroundColor Magenta
+        }
+        elseif ($evt -match "Monitor integrity: OK") {
+            Write-Host $evt -ForegroundColor Green
+        }
+        else {
+            Write-Host $evt -ForegroundColor White
+        }
     }
 }
 
 if (Confirm-ExitWithDelay) {
-Write-Host ""
-Write-Host "Artifact Review Monitoring tab is updated." -ForegroundColor Cyan
-Write-Host "Go to Artifact Review > Monitoring, scroll through the full log, then press Enter here to exit." -ForegroundColor Yellow
-Wait-ForEnter
-
     Stop-Process -Id $PID
 }
