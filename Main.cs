@@ -5,15 +5,17 @@ using System.Security.Principal;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using System.Drawing;
+using System.IO;
 using Microsoft.Win32.SafeHandles;
 
-class UsnJournalGui : Form
+class PrefetchJournalGui : Form
 {
     TextBox outputBox;
     TextBox driveBox;
     NumericUpDown maxRecordsBox;
     NumericUpDown lookbackBox;
     Button runButton;
+    Button prefetchTimesButton;
     Button copyButton;
     Button clearButton;
     Label statusLabel;
@@ -25,7 +27,9 @@ class UsnJournalGui : Form
     const uint OPEN_EXISTING = 3;
 
     const uint FSCTL_QUERY_USN_JOURNAL = 0x000900F4;
-    const uint FSCTL_READ_USN_JOURNAL = 0x000900B8;
+
+    // IMPORTANT: Correct value
+    const uint FSCTL_READ_USN_JOURNAL = 0x000900BB;
 
     const int BUFFER_SIZE = 1024 * 1024;
 
@@ -80,14 +84,14 @@ class UsnJournalGui : Form
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new UsnJournalGui());
+        Application.Run(new PrefetchJournalGui());
     }
 
-    public UsnJournalGui()
+    public PrefetchJournalGui()
     {
-        Text = "USN Journal Viewer";
-        Width = 950;
-        Height = 650;
+        Text = "Prefetch Journal Checker";
+        Width = 1050;
+        Height = 700;
         StartPosition = FormStartPosition.CenterScreen;
 
         Label driveLabel = new Label();
@@ -113,8 +117,8 @@ class UsnJournalGui : Form
         maxRecordsBox.Top = 12;
         maxRecordsBox.Width = 90;
         maxRecordsBox.Minimum = 1;
-        maxRecordsBox.Maximum = 100000;
-        maxRecordsBox.Value = 500;
+        maxRecordsBox.Maximum = 500000;
+        maxRecordsBox.Value = 5000;
 
         Label lookbackLabel = new Label();
         lookbackLabel.Text = "Lookback MB:";
@@ -127,34 +131,41 @@ class UsnJournalGui : Form
         lookbackBox.Top = 12;
         lookbackBox.Width = 90;
         lookbackBox.Minimum = 1;
-        lookbackBox.Maximum = 2048;
-        lookbackBox.Value = 128;
+        lookbackBox.Maximum = 8192;
+        lookbackBox.Value = 512;
 
         runButton = new Button();
-        runButton.Text = "Read Journal";
+        runButton.Text = "Check Prefetch Journal";
         runButton.Left = 540;
         runButton.Top = 10;
-        runButton.Width = 110;
+        runButton.Width = 160;
         runButton.Click += new EventHandler(RunButton_Click);
+
+        prefetchTimesButton = new Button();
+        prefetchTimesButton.Text = "Check Prefetch Times";
+        prefetchTimesButton.Left = 710;
+        prefetchTimesButton.Top = 10;
+        prefetchTimesButton.Width = 150;
+        prefetchTimesButton.Click += new EventHandler(PrefetchTimesButton_Click);
 
         copyButton = new Button();
         copyButton.Text = "Copy";
-        copyButton.Left = 660;
+        copyButton.Left = 870;
         copyButton.Top = 10;
-        copyButton.Width = 80;
+        copyButton.Width = 70;
         copyButton.Click += new EventHandler(CopyButton_Click);
 
         clearButton = new Button();
         clearButton.Text = "Clear";
-        clearButton.Left = 750;
+        clearButton.Left = 950;
         clearButton.Top = 10;
-        clearButton.Width = 80;
+        clearButton.Width = 70;
         clearButton.Click += new EventHandler(ClearButton_Click);
 
         statusLabel = new Label();
         statusLabel.Left = 10;
         statusLabel.Top = 45;
-        statusLabel.Width = 900;
+        statusLabel.Width = 1000;
         statusLabel.Height = 25;
 
         if (IsAdmin())
@@ -164,15 +175,15 @@ class UsnJournalGui : Form
         }
         else
         {
-            statusLabel.Text = "Status: Not Administrator. USN Journal may fail.";
+            statusLabel.Text = "Status: Not Administrator. USN Journal access may fail.";
             statusLabel.ForeColor = Color.Red;
         }
 
         outputBox = new TextBox();
         outputBox.Left = 10;
         outputBox.Top = 75;
-        outputBox.Width = 910;
-        outputBox.Height = 520;
+        outputBox.Width = 1010;
+        outputBox.Height = 570;
         outputBox.Multiline = true;
         outputBox.ScrollBars = ScrollBars.Both;
         outputBox.WordWrap = false;
@@ -185,6 +196,7 @@ class UsnJournalGui : Form
         Controls.Add(lookbackLabel);
         Controls.Add(lookbackBox);
         Controls.Add(runButton);
+        Controls.Add(prefetchTimesButton);
         Controls.Add(copyButton);
         Controls.Add(clearButton);
         Controls.Add(statusLabel);
@@ -195,8 +207,6 @@ class UsnJournalGui : Form
     {
         runButton.Enabled = false;
         outputBox.Clear();
-        Append("Reading USN Journal...");
-        Append("");
 
         string drive = driveBox.Text.Trim();
         int maxRecords = (int)maxRecordsBox.Value;
@@ -206,7 +216,7 @@ class UsnJournalGui : Form
         {
             try
             {
-                string result = ReadUsnJournal(drive, maxRecords, lookbackBytes);
+                string result = CheckPrefetchJournal(drive, maxRecords, lookbackBytes);
                 SetOutput(result);
             }
             catch (Exception ex)
@@ -223,6 +233,12 @@ class UsnJournalGui : Form
         t.Start();
     }
 
+    void PrefetchTimesButton_Click(object sender, EventArgs e)
+    {
+        outputBox.Clear();
+        SetOutput(CheckCurrentPrefetchTimes());
+    }
+
     void CopyButton_Click(object sender, EventArgs e)
     {
         if (outputBox.Text.Length > 0)
@@ -232,17 +248,6 @@ class UsnJournalGui : Form
     void ClearButton_Click(object sender, EventArgs e)
     {
         outputBox.Clear();
-    }
-
-    void Append(string text)
-    {
-        if (outputBox.InvokeRequired)
-        {
-            outputBox.Invoke(new Action<string>(Append), text);
-            return;
-        }
-
-        outputBox.AppendText(text + "\r\n");
     }
 
     void SetOutput(string text)
@@ -274,7 +279,7 @@ class UsnJournalGui : Form
         return principal.IsInRole(WindowsBuiltInRole.Administrator);
     }
 
-    static string ReadUsnJournal(string drive, int maxRecords, long lookbackBytes)
+    static string CheckPrefetchJournal(string drive, int maxRecords, long lookbackBytes)
     {
         StringBuilder log = new StringBuilder();
 
@@ -286,7 +291,11 @@ class UsnJournalGui : Form
 
         string volumePath = @"\\.\" + drive;
 
-        log.AppendLine("Opening volume: " + volumePath);
+        log.AppendLine("PREFETCH USN JOURNAL CHECK");
+        log.AppendLine("==========================");
+        log.AppendLine("Volume: " + volumePath);
+        log.AppendLine("Looking for .pf files that were renamed, deleted, edited, or timestamp/metadata changed.");
+        log.AppendLine("");
 
         SafeFileHandle volume = CreateFile(
             volumePath,
@@ -313,13 +322,98 @@ class UsnJournalGui : Form
         if (startUsn < journal.FirstUsn)
             startUsn = journal.FirstUsn;
 
-        log.AppendLine("Start USN:  " + startUsn);
+        log.AppendLine("Start USN:   " + startUsn);
         log.AppendLine("Max Records: " + maxRecords);
         log.AppendLine("");
 
-        ReadJournalRecords(volume, journal, startUsn, maxRecords, log);
+        int hits = ReadJournalRecords(volume, journal, startUsn, maxRecords, log);
 
         volume.Close();
+
+        log.AppendLine("");
+        log.AppendLine("Prefetch-related hits: " + hits);
+        log.AppendLine("");
+        log.AppendLine("Meaning:");
+        log.AppendLine("- FILE_DELETE = prefetch file was deleted.");
+        log.AppendLine("- RENAME_OLD_NAME / RENAME_NEW_NAME = prefetch file was renamed.");
+        log.AppendLine("- DATA_OVERWRITE / DATA_EXTEND / DATA_TRUNCATION = prefetch file content was edited.");
+        log.AppendLine("- BASIC_INFO_CHANGE = metadata/timestamp/attributes may have changed.");
+        log.AppendLine("");
+        log.AppendLine("Important:");
+        log.AppendLine("USN Journal shows change reason flags. It does not show the old and new timestamp values.");
+
+        return log.ToString();
+    }
+
+    static string CheckCurrentPrefetchTimes()
+    {
+        StringBuilder log = new StringBuilder();
+
+        string prefetchDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Prefetch");
+
+        log.AppendLine("CURRENT PREFETCH TIMESTAMP CHECK");
+        log.AppendLine("================================");
+        log.AppendLine("Folder: " + prefetchDir);
+        log.AppendLine("");
+
+        if (!Directory.Exists(prefetchDir))
+        {
+            log.AppendLine("Prefetch folder not found.");
+            return log.ToString();
+        }
+
+        FileInfo[] files = new DirectoryInfo(prefetchDir).GetFiles("*.pf");
+
+        int suspicious = 0;
+
+        foreach (FileInfo file in files)
+        {
+            DateTime c = file.CreationTime;
+            DateTime w = file.LastWriteTime;
+            DateTime a = file.LastAccessTime;
+
+            bool flag = false;
+            StringBuilder reasons = new StringBuilder();
+
+            if (w < c.AddMinutes(-2))
+            {
+                flag = true;
+                reasons.Append("LastWrite earlier than Creation; ");
+            }
+
+            if (a < c.AddMinutes(-2))
+            {
+                flag = true;
+                reasons.Append("LastAccess earlier than Creation; ");
+            }
+
+            if (file.Length == 0)
+            {
+                flag = true;
+                reasons.Append("Zero-byte prefetch file; ");
+            }
+
+            if (flag)
+            {
+                suspicious++;
+
+                log.AppendLine("[SUSPICIOUS]");
+                log.AppendLine("  File:       " + file.Name);
+                log.AppendLine("  Created:    " + c);
+                log.AppendLine("  Modified:   " + w);
+                log.AppendLine("  Accessed:   " + a);
+                log.AppendLine("  Size:       " + file.Length);
+                log.AppendLine("  Reason:     " + reasons.ToString());
+                log.AppendLine("");
+            }
+        }
+
+        log.AppendLine("Total .pf files: " + files.Length);
+        log.AppendLine("Suspicious timestamp hits: " + suspicious);
+        log.AppendLine("");
+        log.AppendLine("Note:");
+        log.AppendLine("This is only a weak signal. Some timestamp differences can happen naturally.");
+        log.AppendLine("Use this together with USN Journal BASIC_INFO_CHANGE records.");
 
         return log.ToString();
     }
@@ -355,7 +449,7 @@ class UsnJournalGui : Form
         }
     }
 
-    static void ReadJournalRecords(
+    static int ReadJournalRecords(
         SafeFileHandle volume,
         USN_JOURNAL_DATA_V0 journal,
         long startUsn,
@@ -365,7 +459,19 @@ class UsnJournalGui : Form
     {
         READ_USN_JOURNAL_DATA_V0 readData = new READ_USN_JOURNAL_DATA_V0();
         readData.StartUsn = startUsn;
-        readData.ReasonMask = 0xFFFFFFFF;
+
+        // Only suspicious/change-heavy reasons
+        readData.ReasonMask =
+            0x00000001 | // DATA_OVERWRITE
+            0x00000002 | // DATA_EXTEND
+            0x00000004 | // DATA_TRUNCATION
+            0x00000100 | // FILE_CREATE
+            0x00000200 | // FILE_DELETE
+            0x00001000 | // RENAME_OLD_NAME
+            0x00002000 | // RENAME_NEW_NAME
+            0x00008000 | // BASIC_INFO_CHANGE
+            0x80000000;  // CLOSE
+
         readData.ReturnOnlyOnClose = 0;
         readData.Timeout = 0;
         readData.BytesToWaitFor = 0;
@@ -376,6 +482,7 @@ class UsnJournalGui : Form
         IntPtr outputBuffer = Marshal.AllocHGlobal(BUFFER_SIZE);
 
         int totalRecords = 0;
+        int hits = 0;
 
         try
         {
@@ -414,15 +521,26 @@ class UsnJournalGui : Form
 
                     ushort majorVersion = (ushort)Marshal.ReadInt16(outputBuffer, offset + 4);
 
+                    UsnHit hit = null;
+
                     if (majorVersion == 2)
                     {
-                        PrintUsnRecordV2(outputBuffer, offset, log);
-                        totalRecords++;
+                        hit = ParseUsnRecordV2(outputBuffer, offset);
                     }
                     else if (majorVersion == 3)
                     {
-                        PrintUsnRecordV3(outputBuffer, offset, log);
+                        hit = ParseUsnRecordV3(outputBuffer, offset);
+                    }
+
+                    if (hit != null)
+                    {
                         totalRecords++;
+
+                        if (IsPrefetchTarget(hit.Name) && IsSuspiciousPrefetchReason(hit.Reason))
+                        {
+                            hits++;
+                            PrintHit(hit, log);
+                        }
                     }
 
                     offset += recordLength;
@@ -440,51 +558,122 @@ class UsnJournalGui : Form
             Marshal.FreeHGlobal(outputBuffer);
         }
 
-        log.AppendLine("");
-        log.AppendLine("Records shown: " + totalRecords);
-        log.AppendLine("");
-        log.AppendLine("Note: USN records show file name and parent reference, not always full path.");
+        return hits;
     }
 
-    static void PrintUsnRecordV2(IntPtr buffer, int offset, StringBuilder log)
+    class UsnHit
     {
-        ulong fileRef = (ulong)Marshal.ReadInt64(buffer, offset + 8);
-        ulong parentRef = (ulong)Marshal.ReadInt64(buffer, offset + 16);
-        long usn = Marshal.ReadInt64(buffer, offset + 24);
+        public string Version;
+        public string Name;
+        public long Usn;
+        public ulong FileRef;
+        public ulong ParentRef;
+        public DateTime Time;
+        public uint Reason;
+    }
+
+    static UsnHit ParseUsnRecordV2(IntPtr buffer, int offset)
+    {
+        UsnHit hit = new UsnHit();
+
+        hit.Version = "V2";
+        hit.FileRef = (ulong)Marshal.ReadInt64(buffer, offset + 8);
+        hit.ParentRef = (ulong)Marshal.ReadInt64(buffer, offset + 16);
+        hit.Usn = Marshal.ReadInt64(buffer, offset + 24);
+
         long fileTime = Marshal.ReadInt64(buffer, offset + 32);
-        uint reason = (uint)Marshal.ReadInt32(buffer, offset + 40);
+        hit.Time = DateTime.FromFileTimeUtc(fileTime).ToLocalTime();
+
+        hit.Reason = (uint)Marshal.ReadInt32(buffer, offset + 40);
+
         ushort nameLength = (ushort)Marshal.ReadInt16(buffer, offset + 56);
         ushort nameOffset = (ushort)Marshal.ReadInt16(buffer, offset + 58);
 
-        string name = Marshal.PtrToStringUni(AddPtr(buffer, offset + nameOffset), nameLength / 2);
-        DateTime time = DateTime.FromFileTimeUtc(fileTime).ToLocalTime();
+        hit.Name = Marshal.PtrToStringUni(AddPtr(buffer, offset + nameOffset), nameLength / 2);
 
-        log.AppendLine("[" + time + "]");
-        log.AppendLine("  Version:   V2");
-        log.AppendLine("  Name:      " + name);
-        log.AppendLine("  USN:       " + usn);
-        log.AppendLine("  FileRef:   " + fileRef);
-        log.AppendLine("  ParentRef: " + parentRef);
-        log.AppendLine("  Reason:    " + ReasonToString(reason));
-        log.AppendLine("");
+        return hit;
     }
 
-    static void PrintUsnRecordV3(IntPtr buffer, int offset, StringBuilder log)
+    static UsnHit ParseUsnRecordV3(IntPtr buffer, int offset)
     {
-        long usn = Marshal.ReadInt64(buffer, offset + 40);
+        UsnHit hit = new UsnHit();
+
+        hit.Version = "V3";
+        hit.FileRef = 0;
+        hit.ParentRef = 0;
+        hit.Usn = Marshal.ReadInt64(buffer, offset + 40);
+
         long fileTime = Marshal.ReadInt64(buffer, offset + 48);
-        uint reason = (uint)Marshal.ReadInt32(buffer, offset + 56);
+        hit.Time = DateTime.FromFileTimeUtc(fileTime).ToLocalTime();
+
+        hit.Reason = (uint)Marshal.ReadInt32(buffer, offset + 56);
+
         ushort nameLength = (ushort)Marshal.ReadInt16(buffer, offset + 72);
         ushort nameOffset = (ushort)Marshal.ReadInt16(buffer, offset + 74);
 
-        string name = Marshal.PtrToStringUni(AddPtr(buffer, offset + nameOffset), nameLength / 2);
-        DateTime time = DateTime.FromFileTimeUtc(fileTime).ToLocalTime();
+        hit.Name = Marshal.PtrToStringUni(AddPtr(buffer, offset + nameOffset), nameLength / 2);
 
-        log.AppendLine("[" + time + "]");
-        log.AppendLine("  Version:   V3");
-        log.AppendLine("  Name:      " + name);
-        log.AppendLine("  USN:       " + usn);
-        log.AppendLine("  Reason:    " + ReasonToString(reason));
+        return hit;
+    }
+
+    static bool IsPrefetchTarget(string name)
+    {
+        if (String.IsNullOrEmpty(name))
+            return false;
+
+        string upper = name.ToUpperInvariant();
+
+        if (upper.EndsWith(".PF"))
+            return true;
+
+        if (upper == "PREFETCH")
+            return true;
+
+        return false;
+    }
+
+    static bool IsSuspiciousPrefetchReason(uint reason)
+    {
+        uint suspicious =
+            0x00000001 | // DATA_OVERWRITE
+            0x00000002 | // DATA_EXTEND
+            0x00000004 | // DATA_TRUNCATION
+            0x00000200 | // FILE_DELETE
+            0x00001000 | // RENAME_OLD_NAME
+            0x00002000 | // RENAME_NEW_NAME
+            0x00008000;  // BASIC_INFO_CHANGE
+
+        return (reason & suspicious) != 0;
+    }
+
+    static void PrintHit(UsnHit hit, StringBuilder log)
+    {
+        log.AppendLine("[PREFETCH CHANGE]");
+        log.AppendLine("  Time:      " + hit.Time);
+        log.AppendLine("  Version:   " + hit.Version);
+        log.AppendLine("  Name:      " + hit.Name);
+        log.AppendLine("  USN:       " + hit.Usn);
+
+        if (hit.FileRef != 0)
+            log.AppendLine("  FileRef:   " + hit.FileRef);
+
+        if (hit.ParentRef != 0)
+            log.AppendLine("  ParentRef: " + hit.ParentRef);
+
+        log.AppendLine("  Reason:    " + ReasonToString(hit.Reason));
+
+        if ((hit.Reason & 0x00008000) != 0)
+            log.AppendLine("  FLAG:      Possible timestamp/metadata change");
+
+        if ((hit.Reason & 0x00000200) != 0)
+            log.AppendLine("  FLAG:      Prefetch file deleted");
+
+        if ((hit.Reason & 0x00001000) != 0 || (hit.Reason & 0x00002000) != 0)
+            log.AppendLine("  FLAG:      Prefetch file renamed");
+
+        if ((hit.Reason & 0x00000001) != 0 || (hit.Reason & 0x00000002) != 0 || (hit.Reason & 0x00000004) != 0)
+            log.AppendLine("  FLAG:      Prefetch file content changed");
+
         log.AppendLine("");
     }
 
