@@ -1,10 +1,23 @@
 using System;
 using System.Text;
+using System.Threading;
+using System.Security.Principal;
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
+using System.Drawing;
 using Microsoft.Win32.SafeHandles;
 
-class UsnJournalViewer
+class UsnJournalGui : Form
 {
+    TextBox outputBox;
+    TextBox driveBox;
+    NumericUpDown maxRecordsBox;
+    NumericUpDown lookbackBox;
+    Button runButton;
+    Button copyButton;
+    Button clearButton;
+    Label statusLabel;
+
     const uint GENERIC_READ = 0x80000000;
     const uint FILE_SHARE_READ = 0x00000001;
     const uint FILE_SHARE_WRITE = 0x00000002;
@@ -12,7 +25,7 @@ class UsnJournalViewer
     const uint OPEN_EXISTING = 3;
 
     const uint FSCTL_QUERY_USN_JOURNAL = 0x000900F4;
-    const uint FSCTL_READ_USN_JOURNAL  = 0x000900B8;
+    const uint FSCTL_READ_USN_JOURNAL = 0x000900B8;
 
     const int BUFFER_SIZE = 1024 * 1024;
 
@@ -62,17 +75,218 @@ class UsnJournalViewer
         IntPtr lpOverlapped
     );
 
-    static void Main(string[] args)
+    [STAThread]
+    static void Main()
     {
-        string drive = args.Length > 0 ? args[0].TrimEnd('\\') : "C:";
-        int maxRecords = args.Length > 1 ? int.Parse(args[1]) : 500;
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.Run(new UsnJournalGui());
+    }
+
+    public UsnJournalGui()
+    {
+        Text = "USN Journal Viewer";
+        Width = 950;
+        Height = 650;
+        StartPosition = FormStartPosition.CenterScreen;
+
+        Label driveLabel = new Label();
+        driveLabel.Text = "Drive:";
+        driveLabel.Left = 10;
+        driveLabel.Top = 15;
+        driveLabel.Width = 45;
+
+        driveBox = new TextBox();
+        driveBox.Text = "C:";
+        driveBox.Left = 60;
+        driveBox.Top = 12;
+        driveBox.Width = 60;
+
+        Label maxLabel = new Label();
+        maxLabel.Text = "Max Records:";
+        maxLabel.Left = 140;
+        maxLabel.Top = 15;
+        maxLabel.Width = 85;
+
+        maxRecordsBox = new NumericUpDown();
+        maxRecordsBox.Left = 230;
+        maxRecordsBox.Top = 12;
+        maxRecordsBox.Width = 90;
+        maxRecordsBox.Minimum = 1;
+        maxRecordsBox.Maximum = 100000;
+        maxRecordsBox.Value = 500;
+
+        Label lookbackLabel = new Label();
+        lookbackLabel.Text = "Lookback MB:";
+        lookbackLabel.Left = 340;
+        lookbackLabel.Top = 15;
+        lookbackLabel.Width = 85;
+
+        lookbackBox = new NumericUpDown();
+        lookbackBox.Left = 430;
+        lookbackBox.Top = 12;
+        lookbackBox.Width = 90;
+        lookbackBox.Minimum = 1;
+        lookbackBox.Maximum = 2048;
+        lookbackBox.Value = 128;
+
+        runButton = new Button();
+        runButton.Text = "Read Journal";
+        runButton.Left = 540;
+        runButton.Top = 10;
+        runButton.Width = 110;
+        runButton.Click += new EventHandler(RunButton_Click);
+
+        copyButton = new Button();
+        copyButton.Text = "Copy";
+        copyButton.Left = 660;
+        copyButton.Top = 10;
+        copyButton.Width = 80;
+        copyButton.Click += new EventHandler(CopyButton_Click);
+
+        clearButton = new Button();
+        clearButton.Text = "Clear";
+        clearButton.Left = 750;
+        clearButton.Top = 10;
+        clearButton.Width = 80;
+        clearButton.Click += new EventHandler(ClearButton_Click);
+
+        statusLabel = new Label();
+        statusLabel.Left = 10;
+        statusLabel.Top = 45;
+        statusLabel.Width = 900;
+        statusLabel.Height = 25;
+
+        if (IsAdmin())
+        {
+            statusLabel.Text = "Status: Running as Administrator";
+            statusLabel.ForeColor = Color.Green;
+        }
+        else
+        {
+            statusLabel.Text = "Status: Not Administrator. USN Journal may fail.";
+            statusLabel.ForeColor = Color.Red;
+        }
+
+        outputBox = new TextBox();
+        outputBox.Left = 10;
+        outputBox.Top = 75;
+        outputBox.Width = 910;
+        outputBox.Height = 520;
+        outputBox.Multiline = true;
+        outputBox.ScrollBars = ScrollBars.Both;
+        outputBox.WordWrap = false;
+        outputBox.Font = new Font("Consolas", 9);
+
+        Controls.Add(driveLabel);
+        Controls.Add(driveBox);
+        Controls.Add(maxLabel);
+        Controls.Add(maxRecordsBox);
+        Controls.Add(lookbackLabel);
+        Controls.Add(lookbackBox);
+        Controls.Add(runButton);
+        Controls.Add(copyButton);
+        Controls.Add(clearButton);
+        Controls.Add(statusLabel);
+        Controls.Add(outputBox);
+    }
+
+    void RunButton_Click(object sender, EventArgs e)
+    {
+        runButton.Enabled = false;
+        outputBox.Clear();
+        Append("Reading USN Journal...");
+        Append("");
+
+        string drive = driveBox.Text.Trim();
+        int maxRecords = (int)maxRecordsBox.Value;
+        long lookbackBytes = (long)lookbackBox.Value * 1024L * 1024L;
+
+        Thread t = new Thread(delegate()
+        {
+            try
+            {
+                string result = ReadUsnJournal(drive, maxRecords, lookbackBytes);
+                SetOutput(result);
+            }
+            catch (Exception ex)
+            {
+                SetOutput("ERROR:\r\n" + ex.ToString());
+            }
+            finally
+            {
+                SetRunEnabled(true);
+            }
+        });
+
+        t.IsBackground = true;
+        t.Start();
+    }
+
+    void CopyButton_Click(object sender, EventArgs e)
+    {
+        if (outputBox.Text.Length > 0)
+            Clipboard.SetText(outputBox.Text);
+    }
+
+    void ClearButton_Click(object sender, EventArgs e)
+    {
+        outputBox.Clear();
+    }
+
+    void Append(string text)
+    {
+        if (outputBox.InvokeRequired)
+        {
+            outputBox.Invoke(new Action<string>(Append), text);
+            return;
+        }
+
+        outputBox.AppendText(text + "\r\n");
+    }
+
+    void SetOutput(string text)
+    {
+        if (outputBox.InvokeRequired)
+        {
+            outputBox.Invoke(new Action<string>(SetOutput), text);
+            return;
+        }
+
+        outputBox.Text = text;
+    }
+
+    void SetRunEnabled(bool enabled)
+    {
+        if (runButton.InvokeRequired)
+        {
+            runButton.Invoke(new Action<bool>(SetRunEnabled), enabled);
+            return;
+        }
+
+        runButton.Enabled = enabled;
+    }
+
+    static bool IsAdmin()
+    {
+        WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        WindowsPrincipal principal = new WindowsPrincipal(identity);
+        return principal.IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    static string ReadUsnJournal(string drive, int maxRecords, long lookbackBytes)
+    {
+        StringBuilder log = new StringBuilder();
+
+        if (drive.EndsWith("\\"))
+            drive = drive.TrimEnd('\\');
 
         if (!drive.EndsWith(":"))
             drive += ":";
 
         string volumePath = @"\\.\" + drive;
 
-        Console.WriteLine("Opening volume: " + volumePath);
+        log.AppendLine("Opening volume: " + volumePath);
 
         SafeFileHandle volume = CreateFile(
             volumePath,
@@ -85,22 +299,29 @@ class UsnJournalViewer
         );
 
         if (volume.IsInvalid)
-            Fail("Failed to open volume. Run as Administrator.");
+            throw new Exception("Failed to open volume. Run as Administrator. Win32: " + Marshal.GetLastWin32Error());
 
         USN_JOURNAL_DATA_V0 journal = QueryJournal(volume);
 
-        Console.WriteLine("Journal ID: " + journal.UsnJournalID);
-        Console.WriteLine("First USN:  " + journal.FirstUsn);
-        Console.WriteLine("Next USN:   " + journal.NextUsn);
-        Console.WriteLine();
+        log.AppendLine("Journal ID: " + journal.UsnJournalID);
+        log.AppendLine("First USN:  " + journal.FirstUsn);
+        log.AppendLine("Next USN:   " + journal.NextUsn);
+        log.AppendLine("");
 
-        // Start near the end for recent-ish records.
-        // Increase this number if you want to look farther back.
-        long startUsn = Math.Max(journal.FirstUsn, journal.NextUsn - 128L * 1024L * 1024L);
+        long startUsn = journal.NextUsn - lookbackBytes;
 
-        ReadJournal(volume, journal, startUsn, maxRecords);
+        if (startUsn < journal.FirstUsn)
+            startUsn = journal.FirstUsn;
+
+        log.AppendLine("Start USN:  " + startUsn);
+        log.AppendLine("Max Records: " + maxRecords);
+        log.AppendLine("");
+
+        ReadJournalRecords(volume, journal, startUsn, maxRecords, log);
 
         volume.Close();
+
+        return log.ToString();
     }
 
     static USN_JOURNAL_DATA_V0 QueryJournal(SafeFileHandle volume)
@@ -124,12 +345,9 @@ class UsnJournalViewer
             );
 
             if (!ok)
-                Fail("FSCTL_QUERY_USN_JOURNAL failed.");
+                throw new Exception("FSCTL_QUERY_USN_JOURNAL failed. Win32: " + Marshal.GetLastWin32Error());
 
-            return (USN_JOURNAL_DATA_V0)Marshal.PtrToStructure(
-                outBuffer,
-                typeof(USN_JOURNAL_DATA_V0)
-            );
+            return (USN_JOURNAL_DATA_V0)Marshal.PtrToStructure(outBuffer, typeof(USN_JOURNAL_DATA_V0));
         }
         finally
         {
@@ -137,11 +355,12 @@ class UsnJournalViewer
         }
     }
 
-    static void ReadJournal(
+    static void ReadJournalRecords(
         SafeFileHandle volume,
         USN_JOURNAL_DATA_V0 journal,
         long startUsn,
-        int maxRecords
+        int maxRecords,
+        StringBuilder log
     )
     {
         READ_USN_JOURNAL_DATA_V0 readData = new READ_USN_JOURNAL_DATA_V0();
@@ -178,7 +397,7 @@ class UsnJournalViewer
                 );
 
                 if (!ok)
-                    Fail("FSCTL_READ_USN_JOURNAL failed.");
+                    throw new Exception("FSCTL_READ_USN_JOURNAL failed. Win32: " + Marshal.GetLastWin32Error());
 
                 if (bytesReturned <= 8)
                     break;
@@ -197,12 +416,12 @@ class UsnJournalViewer
 
                     if (majorVersion == 2)
                     {
-                        PrintUsnRecordV2(outputBuffer, offset);
+                        PrintUsnRecordV2(outputBuffer, offset, log);
                         totalRecords++;
                     }
                     else if (majorVersion == 3)
                     {
-                        PrintUsnRecordV3(outputBuffer, offset);
+                        PrintUsnRecordV3(outputBuffer, offset, log);
                         totalRecords++;
                     }
 
@@ -221,11 +440,13 @@ class UsnJournalViewer
             Marshal.FreeHGlobal(outputBuffer);
         }
 
-        Console.WriteLine();
-        Console.WriteLine("Records shown: " + totalRecords);
+        log.AppendLine("");
+        log.AppendLine("Records shown: " + totalRecords);
+        log.AppendLine("");
+        log.AppendLine("Note: USN records show file name and parent reference, not always full path.");
     }
 
-    static void PrintUsnRecordV2(IntPtr buffer, int offset)
+    static void PrintUsnRecordV2(IntPtr buffer, int offset, StringBuilder log)
     {
         ulong fileRef = (ulong)Marshal.ReadInt64(buffer, offset + 8);
         ulong parentRef = (ulong)Marshal.ReadInt64(buffer, offset + 16);
@@ -235,23 +456,20 @@ class UsnJournalViewer
         ushort nameLength = (ushort)Marshal.ReadInt16(buffer, offset + 56);
         ushort nameOffset = (ushort)Marshal.ReadInt16(buffer, offset + 58);
 
-        string name = Marshal.PtrToStringUni(
-            IntPtr.Add(buffer, offset + nameOffset),
-            nameLength / 2
-        );
-
+        string name = Marshal.PtrToStringUni(AddPtr(buffer, offset + nameOffset), nameLength / 2);
         DateTime time = DateTime.FromFileTimeUtc(fileTime).ToLocalTime();
 
-        Console.WriteLine("[" + time + "]");
-        Console.WriteLine("  Name:       " + name);
-        Console.WriteLine("  USN:        " + usn);
-        Console.WriteLine("  FileRef:    " + fileRef);
-        Console.WriteLine("  ParentRef:  " + parentRef);
-        Console.WriteLine("  Reason:     " + ReasonToString(reason));
-        Console.WriteLine();
+        log.AppendLine("[" + time + "]");
+        log.AppendLine("  Version:   V2");
+        log.AppendLine("  Name:      " + name);
+        log.AppendLine("  USN:       " + usn);
+        log.AppendLine("  FileRef:   " + fileRef);
+        log.AppendLine("  ParentRef: " + parentRef);
+        log.AppendLine("  Reason:    " + ReasonToString(reason));
+        log.AppendLine("");
     }
 
-    static void PrintUsnRecordV3(IntPtr buffer, int offset)
+    static void PrintUsnRecordV3(IntPtr buffer, int offset, StringBuilder log)
     {
         long usn = Marshal.ReadInt64(buffer, offset + 40);
         long fileTime = Marshal.ReadInt64(buffer, offset + 48);
@@ -259,18 +477,20 @@ class UsnJournalViewer
         ushort nameLength = (ushort)Marshal.ReadInt16(buffer, offset + 72);
         ushort nameOffset = (ushort)Marshal.ReadInt16(buffer, offset + 74);
 
-        string name = Marshal.PtrToStringUni(
-            IntPtr.Add(buffer, offset + nameOffset),
-            nameLength / 2
-        );
-
+        string name = Marshal.PtrToStringUni(AddPtr(buffer, offset + nameOffset), nameLength / 2);
         DateTime time = DateTime.FromFileTimeUtc(fileTime).ToLocalTime();
 
-        Console.WriteLine("[" + time + "]");
-        Console.WriteLine("  Name:       " + name);
-        Console.WriteLine("  USN:        " + usn);
-        Console.WriteLine("  Reason:     " + ReasonToString(reason));
-        Console.WriteLine();
+        log.AppendLine("[" + time + "]");
+        log.AppendLine("  Version:   V3");
+        log.AppendLine("  Name:      " + name);
+        log.AppendLine("  USN:       " + usn);
+        log.AppendLine("  Reason:    " + ReasonToString(reason));
+        log.AppendLine("");
+    }
+
+    static IntPtr AddPtr(IntPtr ptr, int offset)
+    {
+        return new IntPtr(ptr.ToInt64() + offset);
     }
 
     static string ReasonToString(uint reason)
@@ -303,13 +523,5 @@ class UsnJournalViewer
     {
         if ((reason & flag) != 0)
             sb.Append(name).Append("|");
-    }
-
-    static void Fail(string message)
-    {
-        int error = Marshal.GetLastWin32Error();
-        Console.WriteLine("ERROR: " + message);
-        Console.WriteLine("Win32 error: " + error);
-        Environment.Exit(1);
     }
 }
